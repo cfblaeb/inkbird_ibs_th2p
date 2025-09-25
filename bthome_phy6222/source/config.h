@@ -49,6 +49,7 @@
 #define BOARD_TS0202_PIR1 			40 // Tuya TS0202_TZ3000_6ygjfyll PIR
 #define BOARD_TS0202_PIR2 			41 // Tuya TS0202_TZ3040_bb6xaihh PIR
 #define BOARD_HDP16					42 // MiniTag-F2-YY-v2 https://www.ednchina.com/technews/26425.html
+#define BOARD_TN_6ATAG3				43 // TN-6ATAG3-V01
 */
 #define DEVICE_THB2		19
 #define DEVICE_BTH01	20
@@ -60,9 +61,10 @@
 #define DEVICE_KEY2		32
 #define DEVICE_TH04 	34
 #define DEVICE_HDP16	42
+#define DEVICE_TN6ATAG3 43
 
 #ifndef DEVICE
-#define DEVICE		DEVICE_HDP16
+#define DEVICE		DEVICE_TN6ATAG3
 #endif
 
 // supported services by the device (bits)
@@ -530,8 +532,43 @@
 //#define GPIO_INP	GPIO_P15
 
 #define DEF_MODEL_NUMBER_STR		"HDP16"
-#define DEF_HARDWARE_REVISION		"0002"
+#define DEF_HARDWARE_REVISION		"0001"
 #define DEF_MANUFACTURE_NAME_STR	"SHICo" // Shenzhen Haritong Industrial Co
+
+#elif DEVICE == DEVICE_TN6ATAG3
+/* Model: HD-P16, MiLi MiTag F2, SoC: ST17F65  */
+
+#if OTA_TYPE == OTA_TYPE_BOOT
+#define DEV_SERVICES (OTA_TYPE \
+		| SERVICE_BUTTON \
+		| SERVICE_FINDMY \
+		| SERVICE_BINDKEY \
+)
+#else
+#define DEV_SERVICES (OTA_TYPE \
+		| SERVICE_BUTTON \
+		| SERVICE_FINDMY \
+		| SERVICE_BINDKEY \
+)
+#endif
+
+#define ADC_PIN_USE_OUT		1	// hal_gpio_write(ADC_PIN, 1);
+#define ADC_PIN				GPIO_P11
+#define ADC_VBAT_CHL		VBAT_ADC_P11
+
+#define GPIO_KEY	GPIO_P14
+#define KEY_PRESSED	1
+
+#define GPIO_BUZZER	   GPIO_P34
+#define PWM_CHL_BUZZER PWM_CH0
+#define BUZZER_ON	1
+#define BUZZER_OFF	0
+
+//#define GPIO_INP	GPIO_P15
+
+#define DEF_MODEL_NUMBER_STR		"TN6AT"
+#define DEF_HARDWARE_REVISION		"0001"
+#define DEF_MANUFACTURE_NAME_STR	"FreshnRebel" // Fresh `n Rebel
 
 #else
 #error "DEVICE Not released!"

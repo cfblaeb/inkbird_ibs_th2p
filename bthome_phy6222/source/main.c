@@ -337,7 +337,7 @@ const ioinit_cfg_t ioInit[] = {
 		{ GPIO_P33, GPIO_PULL_DOWN },
 		{ GPIO_P34, GPIO_PULL_DOWN }
 
-#elif DEVICE == DEVICE_HDP16
+#elif (DEVICE == DEVICE_HDP16) || (DEVICE == DEVICE_TN6ATAG3)
 
 		{ GPIO_P00 , GPIO_PULL_DOWN }, // sc7a20
 		{ GPIO_P01 , GPIO_PULL_DOWN }, // sc7a20
@@ -347,8 +347,8 @@ const ioinit_cfg_t ioInit[] = {
 		{ GPIO_P09 , GPIO_PULL_UP }, // TX
 		{ GPIO_P10 , GPIO_PULL_UP }, // RX
 		{ GPIO_P11 , GPIO_PULL_UP }, // VBat
-		{ GPIO_P14 , GPIO_PULL_UP }, // Key
-		{ GPIO_P15 , GPIO_PULL_DOWN },
+		{ GPIO_P14 , GPIO_PULL_DOWN }, // Key TN_6ATAG3
+		{ GPIO_P15 , GPIO_PULL_DOWN }, // Key HDP16
 		{ GPIO_P16 , GPIO_PULL_DOWN },
 		{ GPIO_P17 , GPIO_PULL_DOWN },
 		{ GPIO_P18 , GPIO_PULL_DOWN },

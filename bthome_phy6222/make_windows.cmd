@@ -72,6 +72,13 @@
 @if not exist "build\HDP16%SWVER%.hex" goto :error
 @copy "build\HDP16%SWVER%.bin" .\bin
 @
+@del /Q "build\TN6ATAG3%SWVER%.hex"
+@del /Q "build\TN6ATAG3%SWVER%.bin"
+@make -s clean
+@make -s -j PROJECT_NAME=TN6ATAG3%SWVER% PROJECT_DEF="-DDEVICE=DEVICE_TN6ATAG3"
+@if not exist "build\TN6ATAG3%SWVER%.hex" goto :error
+@copy "build\TN6ATAG3%SWVER%.bin" .\bin
+@
 @del /Q "build\BOOT_THB2%SWVER%.hex"
 @make -s clean
 @make -s -j PROJECT_NAME=BOOT_THB2%SWVER% BOOT_OTA=1 PROJECT_DEF="-DDEVICE=DEVICE_THB2"
@@ -141,6 +148,13 @@
 @if not exist "build\BOOT_HDP16%SWVER%.hex" goto :error
 @copy "build\BOOT_HDP16%SWVER%.hex" .\bin
 @copy "build\BOOT_HDP16%SWVER%.bin" .\boot
+@
+@del /Q "build\BOOT_TN6ATAG3%SWVER%.hex"
+@make -s clean
+@make -s -j PROJECT_NAME=BOOT_TN6ATAG3%SWVER% BOOT_OTA=1 PROJECT_DEF="-DDEVICE=DEVICE_TN6ATAG3"
+@if not exist "build\BOOT_TN6ATAG3%SWVER%.hex" goto :error
+@copy "build\BOOT_TN6ATAG3%SWVER%.hex" .\bin
+@copy "build\BOOT_TN6ATAG3%SWVER%.bin" .\boot
 @exit
 :error
 @echo "Error!" 
