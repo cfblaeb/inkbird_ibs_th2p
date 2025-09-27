@@ -557,7 +557,7 @@
 #define ADC_VBAT_CHL		VBAT_ADC_P11
 
 #define GPIO_KEY	GPIO_P14
-#define KEY_PRESSED	1
+#define KEY_PRESSED	0
 
 #define GPIO_BUZZER	   GPIO_P34
 #define PWM_CHL_BUZZER PWM_CH0
