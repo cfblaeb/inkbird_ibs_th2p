@@ -49,7 +49,8 @@
 #define BOARD_TS0202_PIR1 			40 // Tuya TS0202_TZ3000_6ygjfyll PIR
 #define BOARD_TS0202_PIR2 			41 // Tuya TS0202_TZ3040_bb6xaihh PIR
 #define BOARD_HDP16					42 // MiniTag-F2-YY-v2 https://www.ednchina.com/technews/26425.html
-#define BOARD_TN_6ATAG3				43 // TN-6ATAG3-V01
+#define BOARD_TN_6ATAG3				43 // TN-6ATAG3-V01, key
+#define BOARD_ZG303Z				43 // ZG-303Z Plant monitor, 2xAAA, AHT20
 */
 #define DEVICE_THB2		19
 #define DEVICE_BTH01	20
@@ -64,7 +65,7 @@
 #define DEVICE_TN6ATAG3 43
 
 #ifndef DEVICE
-#define DEVICE		DEVICE_TN6ATAG3
+#define DEVICE		DEVICE_TH04
 #endif
 
 // supported services by the device (bits)

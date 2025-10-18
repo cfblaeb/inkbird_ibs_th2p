@@ -331,7 +331,7 @@ const ioinit_cfg_t ioInit[] = {
 		{ GPIO_P18, GPIO_PULL_DOWN },
 		{ GPIO_P20, GPIO_PULL_DOWN },
 		{ GPIO_P23, GPIO_PULL_DOWN },
-		{ GPIO_P24, GPIO_PULL_UP   },	// Key
+		{ GPIO_P24, GPIO_PULL_UP_S   },	// Key
 		{ GPIO_P31, GPIO_PULL_DOWN },
 		{ GPIO_P32, GPIO_PULL_DOWN },
 		{ GPIO_P33, GPIO_PULL_DOWN },
@@ -361,6 +361,7 @@ const ioinit_cfg_t ioInit[] = {
 		{ GPIO_P32 , GPIO_PULL_DOWN },
 		{ GPIO_P33 , GPIO_PULL_DOWN },
 		{ GPIO_P34 , GPIO_PULL_DOWN }   // Buzzer
+
 #elif (DEVICE == DEVICE_TN6ATAG3)
 
 		{ GPIO_P00 , GPIO_PULL_DOWN }, // sc7a20
@@ -521,7 +522,11 @@ int main(void) {
 	wrk.boot_flg = (uint8_t)read_reg(OTA_MODE_SELECT_REG);
 #if defined(OTA_TYPE) && OTA_TYPE == OTA_TYPE_BOOT
 #if (DEV_SERVICES & (SERVICE_KEY | SERVICE_BUTTON))
+#if	KEY_PRESSED == 0
+	hal_gpio_pull_set(GPIO_KEY, GPIO_PULL_UP_S);
+#endif
 	hal_gpio_pin_init(GPIO_KEY, GPIO_INPUT);
+
 	if (hal_gpio_read(GPIO_KEY) == KEY_PRESSED
     	|| wrk.boot_flg == BOOT_FLG_OTA
     	|| wrk.boot_flg == BOOT_FLG_FW0) {
