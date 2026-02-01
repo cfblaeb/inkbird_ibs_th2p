@@ -386,6 +386,33 @@ const ioinit_cfg_t ioInit[] = {
 		{ GPIO_P32 , GPIO_PULL_DOWN },
 		{ GPIO_P33 , GPIO_PULL_DOWN },
 		{ GPIO_P34 , GPIO_PULL_DOWN }   // Buzzer
+
+#elif (DEVICE == DEVICE_IBSTH2P)
+    // Conservative: don't force pins until we know what they do.
+    // Leave most pins floating; the scanner will enable pull-ups temporarily.
+    { GPIO_P00, GPIO_FLOATING },
+    { GPIO_P01, GPIO_FLOATING },
+    { GPIO_P02, GPIO_FLOATING },
+    { GPIO_P03, GPIO_FLOATING },
+    { GPIO_P07, GPIO_FLOATING },  // candidate for KEY; don't assume
+    { GPIO_P09, GPIO_FLOATING },
+    { GPIO_P10, GPIO_FLOATING },
+    { GPIO_P11, GPIO_FLOATING },  // ADC placeholder (VBAT/NTC later)
+    { GPIO_P14, GPIO_FLOATING },
+    { GPIO_P15, GPIO_FLOATING },
+    { GPIO_P16, GPIO_FLOATING },
+    { GPIO_P17, GPIO_FLOATING },
+    { GPIO_P18, GPIO_FLOATING },
+    { GPIO_P20, GPIO_FLOATING },
+    { GPIO_P23, GPIO_FLOATING },
+    { GPIO_P24, GPIO_FLOATING },
+    { GPIO_P25, GPIO_FLOATING },
+    { GPIO_P26, GPIO_FLOATING },
+    { GPIO_P31, GPIO_FLOATING },
+    { GPIO_P32, GPIO_FLOATING },
+    { GPIO_P33, GPIO_FLOATING },
+    { GPIO_P34, GPIO_FLOATING }
+
 #else
 #error "DEVICE Not released!"
 #endif
@@ -536,9 +563,16 @@ int main(void) {
 #endif
     	write_reg(OTA_MODE_SELECT_REG,0);
     } else { // boot FW OTA
+
+#if (DEVICE == DEVICE_IBSTH2P)
+        // IBS-TH2 Plus scanner boot build: do NOT jump to the stock Inkbird APP.
+        // Stay in BOOT so BLE scanning code can run.
+        write_reg(OTA_MODE_SELECT_REG, 0);
+#else
     	spif_config(SYS_CLK_DLL_64M, 1, XFRD_FCMD_READ_DUAL, 0, 0);
     	AP_PCR->CACHE_BYPASS = 1; // just bypass cache
     	startup_app();
+#endif // DEVICE
 	}
 #endif // OTA_TYPE == OTA_TYPE_BOOT
 

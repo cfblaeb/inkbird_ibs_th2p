@@ -63,6 +63,7 @@
 #define DEVICE_TH04 	34
 #define DEVICE_HDP16	42
 #define DEVICE_TN6ATAG3 43
+#define DEVICE_IBSTH2P  44 // Inkbird IBS-TH2 Plus
 
 #ifndef DEVICE
 #define DEVICE		DEVICE_TH04
@@ -149,6 +150,51 @@
 #define DEF_MODEL_NUMBER_STR		"THB2"
 #define DEF_HARDWARE_REVISION		"0013"
 #define DEF_MANUFACTURE_NAME_STR	"Tuya"
+
+#elif DEVICE == DEVICE_IBSTH2P
+
+  /* Inkbird IBS-TH2 Plus */
+
+#if OTA_TYPE == OTA_TYPE_BOOT
+#define DEV_SERVICES (OTA_TYPE | SERVICE_KEY)
+#else
+#define DEV_SERVICES (OTA_TYPE \
+		| SERVICE_SCREEN \
+		| SERVICE_THS \
+		| SERVICE_KEY \
+		| SERVICE_HISTORY \
+		| SERVICE_TH_TRG \
+		| SERVICE_RDS \
+		| SERVICE_BINDKEY \
+)
+#endif
+/*
+#define USE_TH_SENSOR	1
+#define USE_SECREEN		1
+
+#define I2C_SDA 	GPIO_P33 // SDA
+#define I2C_SCL 	GPIO_P34 // SCL
+
+#define I2C_LCD_SDA GPIO_P26 // SDA
+#define I2C_LCD_SCL GPIO_P31 // SCL
+
+#define GPIO_SPWR	GPIO_P00 // питание сенсора
+#define GPIO_LPWR	GPIO_P02 // питание LCD драйвера
+
+#define GPIO_TRG	GPIO_P20 // mark TX2
+#define GPIO_INP	GPIO_P18 // mark RX2
+*/
+// just here to compile
+#define ADC_PIN_USE_OUT		1
+#define ADC_PIN				GPIO_P11
+#define ADC_VBAT_CHL		VBAT_ADC_P11
+
+#define GPIO_KEY	GPIO_P07  // Not really. Just a placeholder.
+#define KEY_PRESSED	0
+
+#define DEF_MODEL_NUMBER_STR		"IBSTH2P"
+#define DEF_HARDWARE_REVISION		"0001"
+#define DEF_MANUFACTURE_NAME_STR	"Inkbird"
 
 #elif DEVICE == DEVICE_BTH01
 /* Model: BTH01 */
