@@ -388,16 +388,15 @@ const ioinit_cfg_t ioInit[] = {
 		{ GPIO_P34 , GPIO_PULL_DOWN }   // Buzzer
 
 #elif (DEVICE == DEVICE_IBSTH2P)
-    // Conservative: don't force pins until we know what they do.
-    // Leave most pins floating; the scanner will enable pull-ups temporarily.
+    // V8: UART0 pins for inter-chip communication
     { GPIO_P00, GPIO_FLOATING },
     { GPIO_P01, GPIO_FLOATING },
     { GPIO_P02, GPIO_FLOATING },
     { GPIO_P03, GPIO_FLOATING },
-    { GPIO_P07, GPIO_FLOATING },  // candidate for KEY; don't assume
-    { GPIO_P09, GPIO_FLOATING },
-    { GPIO_P10, GPIO_FLOATING },
-    { GPIO_P11, GPIO_FLOATING },  // ADC placeholder (VBAT/NTC later)
+    { GPIO_P07, GPIO_FLOATING },
+    { GPIO_P09, GPIO_PULL_UP },   // UART0 TX to main chip (idle-high)
+    { GPIO_P10, GPIO_PULL_UP },   // UART0 RX from main chip (idle-high)
+    { GPIO_P11, GPIO_PULL_UP },   // VBat ADC
     { GPIO_P14, GPIO_FLOATING },
     { GPIO_P15, GPIO_FLOATING },
     { GPIO_P16, GPIO_FLOATING },
@@ -548,6 +547,22 @@ int main(void) {
 #endif
 	wrk.boot_flg = (uint8_t)read_reg(OTA_MODE_SELECT_REG);
 #if defined(OTA_TYPE) && OTA_TYPE == OTA_TYPE_BOOT
+#if (DEVICE == DEVICE_IBSTH2P)
+	// Always-boot mode for IBS-TH2 Plus:
+	// On every reset, check staged updater image and jump only if it targets SRAM.
+	spif_config(SYS_CLK_DLL_64M, 1, XFRD_FCMD_READ_DUAL, 0, 0);
+	AP_PCR->CACHE_BYPASS = 1; // just bypass cache
+	{
+		extern uint32_t startup_app_get_addr(void);
+		uint32_t start_addr = startup_app_get_addr();
+		// Jump only to RAM target (staged updater). Keep boot resident otherwise.
+		if (start_addr >= 0x1fff0000 && start_addr < 0x20020000) {
+			extern void startup_app_jump(uint32_t addr);
+			startup_app_jump(start_addr);
+		}
+	}
+	write_reg(OTA_MODE_SELECT_REG, 0);
+#else
 #if (DEV_SERVICES & (SERVICE_KEY | SERVICE_BUTTON))
 #if	KEY_PRESSED == 0
 	hal_gpio_pull_set(GPIO_KEY, GPIO_PULL_UP_S);
@@ -563,20 +578,14 @@ int main(void) {
 #endif
     	write_reg(OTA_MODE_SELECT_REG,0);
     } else { // boot FW OTA
-
-#if (DEVICE == DEVICE_IBSTH2P)
-        // IBS-TH2 Plus scanner boot build: do NOT jump to the stock Inkbird APP.
-        // Stay in BOOT so BLE scanning code can run.
-        write_reg(OTA_MODE_SELECT_REG, 0);
-#else
     	spif_config(SYS_CLK_DLL_64M, 1, XFRD_FCMD_READ_DUAL, 0, 0);
     	AP_PCR->CACHE_BYPASS = 1; // just bypass cache
     	startup_app();
-#endif // DEVICE
 	}
+#endif // DEVICE == DEVICE_IBSTH2P
 #endif // OTA_TYPE == OTA_TYPE_BOOT
 
-#if CFG_SLEEP_MODE == PWR_MODE_SLEEP
+#if CFG_SLEEP_MODE == PWR_MODE_SLEEP && DEVICE != DEVICE_IBSTH2P
 	watchdog_config(WDG_32S);
 #endif
 

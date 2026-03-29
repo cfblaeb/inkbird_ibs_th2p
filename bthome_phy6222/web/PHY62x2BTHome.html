@@ -987,6 +987,7 @@ function disableControls(state)
 	$('btnReadAddr').disabled = state;
 	$('btnWriteAddr').disabled = state;
 	$('btnSendCommand').disabled = state;
+	$('btnIoScan').disabled = state;
 	
 	$('btnGetMAC').disabled = state;
 	$('btnSetMAC').disabled = state;
@@ -1421,6 +1422,227 @@ function writeCmd(data) {
 	}
 }
 
+var ioScan = {
+	active: false,
+	mode: 1,
+	scanId: 0,
+	totalChunks: 0,
+	nextChunk: 0,
+	budgetUnits: 180
+};
+
+function startIoScan() {
+	if(!cmdCharacteristic) {
+		showError('SCAN failed: command characteristic is not ready');
+		return;
+	}
+	if(ioScan.active) {
+		addLog('SCAN busy');
+		return;
+	}
+	ioScan.active = true;
+	ioScan.scanId = Math.floor(Math.random() * 256);
+	ioScan.totalChunks = 0;
+	ioScan.nextChunk = 0;
+	addLog(`SCAN start id=${ioScan.scanId} mode=${ioScan.mode ? 'aggr' : 'safe'} budget=${ioScan.budgetUnits * 10}ms`);
+	let req = new Uint8Array([0x03, 0x00, ioScan.mode, ioScan.scanId, 0x00, 0x00, ioScan.budgetUnits]);
+	cmdCharacteristic.writeValue(req).catch(error => {
+		ioScan.active = false;
+		showError('SCAN start failed: ' + error);
+	});
+}
+
+function requestIoScanChunk(idx) {
+	if(!cmdCharacteristic)
+		return;
+	let req = new Uint8Array([0x03, 0x01, ioScan.mode, ioScan.scanId, idx & 0xff, 0x00, ioScan.budgetUnits]);
+	cmdCharacteristic.writeValue(req).catch(error => {
+		ioScan.active = false;
+		showError('SCAN chunk request failed: ' + error);
+	});
+}
+
+function parseIoScanRecord(recordType, recordCount, payload) {
+	// Pin enum-to-name mapping for PHY6222
+	const pinNames = {0:'P00',1:'P01',2:'P02',3:'P03',4:'P07',5:'P09',6:'P10',7:'P11',8:'P14',9:'P15',10:'P16',11:'P17',12:'P18',13:'P20',14:'P23',15:'P24',16:'P25',17:'P26',18:'P27',19:'P31',20:'P32',21:'P33',22:'P34'};
+	const pn = (e) => pinNames[e] || `?${e}`;
+	if(recordType == 1 && payload.length >= 6) {
+		let act = (payload.length >= 7) ? ` act=${payload[6]}` : '';
+		let tag = (payload.length >= 7 && payload[6] > 0) ? ' **ACTIVE**' : '';
+		addLog(`SCAN gpio ${pn(payload[0])} f=${payload[1]} pu=${payload[2]} pd=${payload[3]} st=${payload[4]} class=${payload[5]}${act}${tag}`);
+	} else if(recordType == 2 && payload.length >= 6) {
+		let extra = '';
+		if (payload.length >= 8) {
+			let addrs = [payload[2], payload[4], payload[6], payload[7]].filter(a => a > 0);
+			extra = addrs.length > 0 ? ` found=[${addrs.map(a=>'0x'+hex(a,2)).join(',')}]` : ' found=none';
+		}
+		addLog(`SCAN i2c sda=${pn(payload[0])} scl=${pn(payload[1])} devs=${payload[3]} addr=0x${hex(payload[2],2)} conf=${payload[5]}${extra}`);
+	} else if(recordType == 3 && payload.length >= 4) {
+		const baudRates = [9600, 19200, 38400, 57600, 115200];
+		let pin = pn(payload[0]);
+		let baud = baudRates[payload[1]] || '?';
+		let rxCount = payload[2] | (payload[3] << 8);
+		addLog(`SCAN uart pin=${pin} baud=${baud} totalBytes=${rxCount}`);
+	} else if(recordType == 7 && payload.length >= 2) {
+		let offset = payload[0] | (payload[1] << 8);
+		let dataBytes = payload.slice(2);
+		let dataHex = bytesToHex(dataBytes);
+		let ascii = '';
+		for(let i = 0; i < dataBytes.length; i++) {
+			let c = dataBytes[i];
+			ascii += (c >= 0x20 && c <= 0x7e) ? String.fromCharCode(c) : '.';
+		}
+		addLog(`SCAN uart @${offset}: ${dataHex} [${ascii}]`);
+	} else if(recordType == 9 && payload.length >= 2) {
+		// TX probe header: [phase_id, tx_len, tx_data...]
+		let phaseId = payload[0];
+		let txLen = payload[1];
+		let txData = payload.slice(2, 2 + txLen);
+		const probeNames = ['baseline (no TX)', '0xFF wakeup', '0xA5 marker', '0xA5 0x00 mini-frame',
+			'0x01 simple cmd', '0xA4 0x01 request', '0xA5 0x01 request alt', '0xA4 full zero frame'];
+		let name = probeNames[phaseId] || `probe ${phaseId}`;
+		if(txLen > 0)
+			addLog(`--- PROBE ${phaseId}: TX [${bytesToHex(txData)}] (${name}) ---`);
+		else
+			addLog(`--- PROBE ${phaseId}: ${name} ---`);
+	} else if(recordType == 8 && payload.length >= 3) {
+		// TX probe response frame: [phase_id, frame_num, frame_len, frame_data...]
+		let phaseId = payload[0];
+		let frameNum = payload[1];
+		let frameLen = payload[2];
+		if(payload.length >= 3 + frameLen) {
+			let frameData = payload.slice(3, 3 + frameLen);
+			let marker = frameData.length > 0 ? hex(frameData[0], 2) : '??';
+			let grouped = '';
+			for(let i = 0; i < frameData.length; i++) {
+				if(i > 0 && (i % 3) == 0) grouped += ' | ';
+				else if(i > 0) grouped += ' ';
+				grouped += hex(frameData[i], 2);
+			}
+			addLog(`  P${phaseId} FRAME #${frameNum} [${frameLen}B] 0x${marker}: ${grouped}`);
+		}
+	} else if(recordType == 6 && payload.length >= 6) {
+		let proto = ['GPIO','GPIO','I2C','UART'][payload[0]] || `phase${payload[0]}`;
+		let extra = (payload.length >= 8) ? ` devs=${payload[6]} sensorPresent=${payload[7]}` : '';
+		addLog(`SCAN summary proto=${proto} pins=${pn(payload[1])}/${pn(payload[2])} conf=${payload[3]} sensorType=${payload[4]} mode=${payload[5]}${extra}`);
+	} else if(recordType == 10 && payload.length >= 4) {
+		// Long-listen reference: [ref_len, total_lo, total_hi, num_diffs, ref_data...]
+		let refLen = payload[0];
+		let totalFrames = payload[1] | (payload[2] << 8);
+		let numDiffs = payload[3];
+		let refData = payload.slice(4, 4 + refLen);
+		addLog(`=== PASSIVE LISTEN (15s) ===`);
+		addLog(`  Total frames: ${totalFrames}, Unique diffs: ${numDiffs}`);
+		if(refData.length > 0)
+			addLog(`  Reference [${refLen}B]: ${bytesToHex(refData)}`);
+		if(numDiffs == 0)
+			addLog(`  *** STREAM IS CONSTANT - no frame ever differed from reference ***`);
+	} else if(recordType == 11 && payload.length >= 4) {
+		// Long-listen diff: [diff_idx, at_lo, at_hi, diff_len, diff_data...]
+		let diffIdx = payload[0];
+		let atFrame = payload[1] | (payload[2] << 8);
+		let diffLen = payload[3];
+		let diffData = payload.slice(4, 4 + diffLen);
+		addLog(`  DIFF #${diffIdx} at frame ${atFrame} [${diffLen}B]: ${bytesToHex(diffData)}`);
+	} else if(recordType == 12 && payload.length >= 5) {
+		// Legacy modbus result (V6) — kept for backwards compat
+		addLog(`SCAN modbus (V6) data=${bytesToHex(payload)}`);
+	} else if(recordType == 13 && payload.length >= 5) {
+		addLog(`SCAN modbus diff (V6) data=${bytesToHex(payload)}`);
+	} else if(recordType == 14 && payload.length >= 4) {
+		addLog(`SCAN echo (V6) data=${bytesToHex(payload)}`);
+	} else if(recordType == 15 && payload.length >= 4) {
+		addLog(`SCAN echo diff (V6) data=${bytesToHex(payload)}`);
+	} else if(recordType == 16 && payload.length >= 5) {
+		// Timed response probe: [probe_idx, tx_len, frames_lo, frames_hi, num_diffs, tx_data...]
+		let probeIdx = payload[0];
+		let txLen = payload[1];
+		let frames = payload[2] | (payload[3] << 8);
+		let numDiffs = payload[4];
+		let txData = payload.slice(5, 5 + txLen);
+		const probeNames = [
+			'0x01 ACK', '0x06 ACK', 'A5 00', 'A5 01', 'A4 00',
+			'A5 03 (FC3)', 'A5 04 (FC4)', 'A5 01+zeros', 'A4 01+zeros',
+			'echo ref frame', 'ref[1]=0x01', 'A5 05 01'
+		];
+		let name = probeNames[probeIdx] || `probe ${probeIdx}`;
+		let result = numDiffs > 0 ? `*** ${numDiffs} DIFFERENT ***` : 'same';
+		let txHex = txLen > 0 ? bytesToHex(txData) : '(none)';
+		addLog(`TIMED #${probeIdx} [${name}] TX=[${txHex}] -> ${frames}f, ${result}`);
+	} else if(recordType == 17 && payload.length >= 2) {
+		// Timed probe diff: [probe_idx, diff_len, diff_data...]
+		let probeIdx = payload[0];
+		let diffLen = payload[1];
+		let diffData = payload.slice(2, 2 + diffLen);
+		addLog(`  TIMED #${probeIdx} DIFF [${diffLen}B]: ${bytesToHex(diffData)}`);
+	} else {
+		addLog(`SCAN rec type=${recordType} data=${bytesToHex(payload)}`);
+	}
+}
+
+function parseIoScanBlock(value) {
+	let len = value.byteLength;
+	let raw = bytesToHex(new Uint8Array(value.buffer, value.byteOffset, len));
+	addLog(`SCAN rx len=${len} raw=${raw}`);
+	if(len < 10) {
+		if(len >= 2) {
+			let sc = value.getUint8(1);
+			if(sc == 0xff) {
+				addLog('SCAN unsupported by running firmware (old boot image)');
+			} else {
+				addLog(`SCAN short response len=${len} code=${sc}`);
+			}
+		} else {
+			addLog('SCAN malformed response');
+		}
+		ioScan.active = false;
+		return;
+	}
+	let status = value.getUint8(1);
+	let op = value.getUint8(2);
+	let mode = value.getUint8(3);
+	let scanId = value.getUint8(4);
+	let phase = value.getUint8(5);
+	let totalChunks = value.getUint8(6);
+	let chunkIndex = value.getUint8(7);
+	let recordType = value.getUint8(8);
+	let recordCount = value.getUint8(9);
+	let payload = new Uint8Array(value.buffer, value.byteOffset + 10, len - 10);
+
+	if(status != 0) {
+		addLog(`SCAN status=${status} op=${op} phase=${phase}`);
+		if(status == 4 || status == 2 || status == 3)
+			ioScan.active = false;
+		return;
+	}
+
+	if(op == 0) {
+		ioScan.mode = mode;
+		ioScan.scanId = scanId;
+		ioScan.totalChunks = totalChunks;
+		ioScan.nextChunk = 0;
+		addLog(`SCAN started id=${scanId} chunks=${totalChunks} phase=${phase}`);
+		if(totalChunks > 0) {
+			requestIoScanChunk(ioScan.nextChunk);
+		} else {
+			ioScan.active = false;
+			addLog('SCAN no chunks');
+		}
+		return;
+	}
+
+	if(op == 1) {
+		parseIoScanRecord(recordType, recordCount, payload);
+		ioScan.nextChunk = chunkIndex + 1;
+		if(ioScan.nextChunk < ioScan.totalChunks) {
+			requestIoScanChunk(ioScan.nextChunk);
+		} else {
+			ioScan.active = false;
+			addLog(`SCAN complete id=${ioScan.scanId} chunks=${ioScan.totalChunks}`);
+		}
+	}
+}
+
 function readAddress() {
 	if(cmdCharacteristic) {
 		let faddr = parseInt($('inpAddr').value, 16);
@@ -1486,6 +1708,10 @@ function parseBlkCustom(value) {
 	let len = value.byteLength;
 	if(len == 0) return;
 	let blkId = value.getUint8(0);
+	if(blkId == 0x03) {
+		parseIoScanBlock(value);
+		return;
+	}
 	if((blkId == 0x00) && (len >= 12)) {
 	// CMD_ID_DEVID Get dev id, version, services
 		devSrv.revision = value.getUint8(1);
@@ -2639,6 +2865,7 @@ window.onload = function() {
 	<td style="width:100px;"><span data-i18ntag="COMMAND">Команда</span>:</td>
 	<td><button type="button" id="btnSendCommand" onclick="sendCommand()" style="width:120px;" data-i18ntag="SEND">Выполнить</button></td>
 	<td><input type="text" id="inpCmdData" value="55" maxlength="50"></td>
+	<td><button type="button" id="btnIoScan" onclick="startIoScan()" style="width:120px;">Scan IO</button></td>
   </tr>
 </table>
 <hr>

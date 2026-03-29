@@ -62,6 +62,8 @@ int ota_parser(unsigned char *pout, unsigned char *pmsg, unsigned int msg_size);
 
 #if OTA_TYPE == OTA_TYPE_BOOT
 void startup_app(void);
+uint32_t startup_app_get_addr(void);
+void startup_app_jump(uint32_t addr);
 #endif
 
 #endif // OTA_TYPE

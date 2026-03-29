@@ -46,6 +46,7 @@
 #include "lcd.h"
 #include "logger.h"
 #include "trigger.h"
+#include "cmd_parser.h"
 /*********************************************************************
  * MACROS
  */
@@ -558,6 +559,9 @@ void SimpleBLEPeripheral_Init( uint8_t task_id )
 #if (DEV_SERVICES & SERVICE_THS)
 	init_sensor();
 #endif
+#if DEVICE == DEVICE_IBSTH2P
+	ucap_init();
+#endif
 	set_serial_number();
 
 	// Setup the GAP
@@ -674,6 +678,10 @@ void SimpleBLEPeripheral_Init( uint8_t task_id )
 #if	(DEV_SERVICES & (SERVICE_RDS | SERVICE_BUTTON))
 	adv_wrk.rds_timer_tik = clkt.utc_time_tik - (RDS_EVENT_START_SEC << 15);
 #endif
+#if DEVICE == DEVICE_IBSTH2P
+	// Register MOD_USR0 for BLE connection sleep lock
+	hal_pwrmgr_register(MOD_USR0, NULL, NULL);
+#endif
 
 	LOG("=====SimpleBLEPeripheral_Init Done=======\n");
 }
@@ -718,7 +726,12 @@ uint16_t BLEPeripheral_ProcessEvent( uint8_t task_id, uint16_t events )
 	// enable adv (from gaprole start)
 	if ( events & SBP_RESET_ADV_EVT ) {
 		LOG("SBP_RESET_ADV_EVT\n");
+#if DEVICE == DEVICE_IBSTH2P
+		// Start near measure_interval so first temp update happens in ~10 sec
+		adv_wrk.meas_count = cfg.measure_interval - 2;
+#else
 		adv_wrk.meas_count = 0;
+#endif
 		// set_new_adv_interval(DEF_ADV_INERVAL); // actual time = advInt * 625us
 		gatrole_advert_enable(TRUE);
 		return ( events ^ SBP_RESET_ADV_EVT );
@@ -738,7 +751,14 @@ uint16_t BLEPeripheral_ProcessEvent( uint8_t task_id, uint16_t events )
 			batt_start_measure();
 		}
 		read_sensors(); // measured_data.count++;
+#if DEVICE == DEVICE_IBSTH2P
+		// For IBSTH2P: start grab AFTER read, then reload timer for next window.
+		// read_sensors unlocks UART; start_measure locks it again for next grab.
 		start_measure();
+		osal_start_timerEx(simpleBLEPeripheral_TaskID, TIMER_BATT_EVT, 10000); // 10s grab window
+#else
+		start_measure();
+#endif
 #if (DEV_SERVICES & SERVICE_SCREEN)
 		chow_lcd(1);
 #endif
@@ -1014,7 +1034,13 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 			adv_wrk.adv_event = 0;
 			adv_wrk.meas_count = 0;
 			adv_wrk.adv_reload_count = 1;
-#if (DEV_SERVICES & SERVICE_THS)
+#if DEVICE == DEVICE_IBSTH2P
+			// Prevent sleep during BLE connection — needed for stable conn events
+			hal_pwrmgr_lock(MOD_USR0);
+			// Trigger first measurement quickly (10 sec), then every 5 min
+			ucap_start_grab();
+			osal_start_timerEx(simpleBLEPeripheral_TaskID, TIMER_BATT_EVT, 10000);
+#elif (DEV_SERVICES & SERVICE_THS)
 			osal_start_reload_timer(simpleBLEPeripheral_TaskID, TIMER_BATT_EVT, adv_wrk.measure_interval_ms); // 10000 ms
 #else
 			osal_start_reload_timer(simpleBLEPeripheral_TaskID, TIMER_BATT_EVT, cfg.batt_interval*1000);
@@ -1034,6 +1060,10 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 		case GAPROLE_WAITING:
 			LOG("Gaprole_Disconnection\n");
 			osal_stop_timerEx(simpleBLEPeripheral_TaskID, TIMER_BATT_EVT);
+#if DEVICE == DEVICE_IBSTH2P
+			// Allow sleep again after disconnect
+			hal_pwrmgr_unlock(MOD_USR0);
+#endif
 			bthome_data_beacon((void *) gapRole_AdvertData);
 #if 1 //FIX_CONN_INTERVAL
 			gapRole_SlaveLatency = periConnParameters.latency = cfg.connect_latency;

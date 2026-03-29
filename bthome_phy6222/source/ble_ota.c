@@ -334,5 +334,24 @@ void startup_app(void) {
     }
 }
 
+__ATTR_SECTION_XIP__
+uint32_t startup_app_get_addr(void) {
+    // Load App segments into RAM (if any) and return the start address.
+    // Does NOT jump - caller decides whether to jump.
+    HAL_ENTER_CRITICAL_SECTION();
+    uint32_t addr = start_app();
+    HAL_EXIT_CRITICAL_SECTION();
+    return addr;
+}
+
+__ATTR_SECTION_XIP__
+void startup_app_jump(uint32_t addr) {
+    // Jump to the given address (used after startup_app_get_addr).
+    HAL_ENTER_CRITICAL_SECTION();
+    if(addr) {
+        jump2app(addr);
+    }
+}
+
 #endif // OTA_TYPE
 

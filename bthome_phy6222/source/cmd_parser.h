@@ -105,6 +105,12 @@ extern const dev_id_t dev_id;
 
 int cmd_parser(uint8_t * obuf, uint8_t * ibuf, uint32_t len);
 
+#if DEVICE == DEVICE_IBSTH2P
+int ucap_init(void);
+void ucap_start_grab(void);
+void ucap_update_measured_data(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
