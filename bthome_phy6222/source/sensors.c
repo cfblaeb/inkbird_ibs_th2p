@@ -118,6 +118,13 @@ int read_sensor_ahtxx(pdev_i2c_t pi2c_dev) {
 
 
 int read_sensors(void) {
+#if DEVICE == DEVICE_IBSTH2P
+	// Data is populated by UART capture module (ucap) in cmd_parser.c
+	extern void ucap_update_measured_data(void);
+	ucap_update_measured_data();
+	measured_data.count++;
+	return 0;
+#endif
 	int ret = 1;
 	if(thsensor_cfg.i2c_addr && thsensor_cfg.read_sensor != NULL) {
 		init_i2c(&i2c_dev0);
@@ -141,6 +148,13 @@ int read_sensors(void) {
 
 
 void start_measure(void) {
+#if DEVICE == DEVICE_IBSTH2P
+	{
+		extern void ucap_start_grab(void);
+		ucap_start_grab();
+	}
+	return;
+#endif
 	if(thsensor_cfg.i2c_addr) {
 		if(thsensor_cfg.i2c_addr == AHT2x_I2C_ADDR) {
 			init_i2c(&i2c_dev0);
@@ -232,6 +246,13 @@ void power_off_sensor(void) {
 
 __ATTR_SECTION_XIP__
 void init_sensor(void) {
+#if DEVICE == DEVICE_IBSTH2P
+	// No I2C sensor - data comes from inter-chip UART capture
+	thsensor_cfg.sensor_type = TH_SENSOR_NONE;
+	thsensor_cfg.i2c_addr = 0;
+	thsensor_cfg.read_sensor = NULL;
+	return;
+#endif
 	thsensor_def_cfg_t *ptabinit = NULL;
 	thsensor_cfg.read_sensor = NULL;
 	thsensor_cfg.sensor_type = TH_SENSOR_NONE;

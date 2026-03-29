@@ -33,11 +33,657 @@
 #include "buzzer.h"
 #include "bthome_beacon.h"
 #include "findmy_beacon.h"
+#include "gpio.h"
+#include "dev_i2c.h"
+#include "uart.h"
+#include "pwrmgr.h"
 /*********************************************************************/
 
 extern gapPeriConnectParams_t periConnParameters;
 
 #define SEND_DATA_SIZE	16
+
+#if DEVICE == DEVICE_IBSTH2P
+// ============================================================
+// V10: Inter-chip UART frame parser
+// ============================================================
+// The main MCU sends 13-byte frames on UART0 (TX=P09, RX=P10, 9600 baud):
+//   'R' + 11 data bytes + 'E'
+//
+// Frame layout (0-indexed within the 13-byte frame):
+//   [0]    = 0x52 'R' start marker
+//   [1-2]  = unknown (counter/status, varies)
+//   [3-4]  = temperature (LE int16, x0.01 °C)
+//   [5-6]  = humidity (LE int16, x0.01 %)
+//   [7-8]  = flags (both 0x01 observed)
+//   [9]    = unknown (varies slowly, ~0x50-0x55)
+//   [10-11]= checksum (likely CRC-16)
+//   [12]   = 0x45 'E' end marker
+
+#define FRAME_START 0x52  // 'R'
+#define FRAME_END   0x45  // 'E'
+#define FRAME_SIZE  13
+
+// Raw byte capture — records first RAWCAP_SIZE bytes for debugging
+#define RAWCAP_SIZE 64
+static uint8_t rawcap_buf[RAWCAP_SIZE];
+static volatile uint8_t rawcap_pos = 0;
+
+typedef struct {
+	uint8_t frame_buf[FRAME_SIZE];
+	uint8_t frame_pos;
+	uint8_t in_frame;  // 1 = collecting bytes after 'R'
+
+	// Stats
+	volatile uint32_t total_bytes;
+	volatile uint16_t good_frames;
+	volatile uint16_t bad_bytes;
+
+	// Latest parsed sensor values (updated in ISR)
+	volatile int16_t  last_temp;     // x0.01 °C
+	volatile int16_t  last_humi;     // x0.01 %  (from frame[5-6])
+	volatile uint8_t  last_byte1;    // frame[1] for debugging
+	volatile uint8_t  last_byte2;    // frame[2] for debugging
+	volatile uint8_t  last_byte9;    // frame[9] for debugging (unknown)
+	volatile uint8_t  last_flags7;   // frame[7]
+	volatile uint8_t  last_flags8;   // frame[8]
+
+	volatile uint8_t  sensor_valid;
+	uint8_t uart_inited;
+} uart_capture_t;
+
+uart_capture_t ucap;
+
+static uart_Cfg_t ucap_uart_cfg;  // saved for re-init after sleep
+
+static void ucap_process_frame(void) {
+	uint8_t *f = ucap.frame_buf;
+
+	// Verify end marker
+	if (f[FRAME_SIZE - 1] != FRAME_END) {
+		ucap.bad_bytes++;
+		return;
+	}
+
+	ucap.good_frames++;
+	ucap.sensor_valid = 1;
+
+	// Temperature: bytes 3-4, LE int16, x0.01 °C
+	ucap.last_temp = (int16_t)(f[3] | (f[4] << 8));
+
+	// Humidity: bytes 5-6, LE int16, x0.01 %
+	ucap.last_humi = (int16_t)(f[5] | (f[6] << 8));
+
+	// Debug fields
+	ucap.last_byte1 = f[1];
+	ucap.last_byte2 = f[2];
+	ucap.last_byte9 = f[9];
+	ucap.last_flags7 = f[7];
+	ucap.last_flags8 = f[8];
+}
+
+static void ucap_callback(uart_Evt_t *pev) {
+	if (pev->type != UART_EVT_TYPE_RX_DATA && pev->type != UART_EVT_TYPE_RX_DATA_TO)
+		return;
+
+	for (int i = 0; i < pev->len; i++) {
+		uint8_t b = pev->data[i];
+		ucap.total_bytes++;
+
+		// Capture raw bytes (first RAWCAP_SIZE only)
+		if (rawcap_pos < RAWCAP_SIZE) {
+			rawcap_buf[rawcap_pos++] = b;
+		}
+
+		if (b == FRAME_START) {
+			// Start of new frame (or restart if we were mid-frame)
+			ucap.frame_buf[0] = b;
+			ucap.frame_pos = 1;
+			ucap.in_frame = 1;
+		} else if (ucap.in_frame) {
+			ucap.frame_buf[ucap.frame_pos++] = b;
+			if (ucap.frame_pos >= FRAME_SIZE) {
+				ucap_process_frame();
+				ucap.in_frame = 0;
+			}
+		} else {
+			ucap.bad_bytes++;
+		}
+	}
+}
+
+int ucap_init(void) {
+	memset(&ucap, 0, sizeof(ucap));
+	memset(rawcap_buf, 0, sizeof(rawcap_buf));
+	rawcap_pos = 0;
+
+	uart_Cfg_t cfg;
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.tx_pin = GPIO_P09;
+	cfg.rx_pin = GPIO_P10;
+	cfg.baudrate = 9600;
+	cfg.use_fifo = TRUE;
+	cfg.hw_fwctrl = FALSE;
+	cfg.use_tx_buf = FALSE;
+	cfg.parity = FALSE;
+	cfg.evt_handler = ucap_callback;
+
+	memcpy(&ucap_uart_cfg, &cfg, sizeof(cfg));  // save for re-init
+
+	int ret = hal_uart_init(cfg, UART0);
+	ucap.uart_inited = (ret == 0) ? 1 : 0;
+
+	if (ret == 0) {
+		// Lock UART to capture frames immediately on boot.
+		// Will be unlocked at the first read_sensors() call (~10 sec).
+		hal_pwrmgr_lock(MOD_UART0);
+	}
+
+	return ret;
+}
+
+// Re-init UART hardware and lock to prevent sleep during grab window.
+// Called from start_measure() one adv cycle before read_sensors().
+void ucap_start_grab(void) {
+	if (ucap.uart_inited) {
+		// After sleep, UART hardware is powered down.
+		// Lock alone doesn't restore it — must deinit+init to reconfigure.
+		hal_uart_deinit(UART0);
+		hal_uart_init(ucap_uart_cfg, UART0);
+		hal_pwrmgr_lock(MOD_UART0);
+	}
+}
+
+// Copy captured sensor data into measured_data (called from read_sensors),
+// then unlock UART so the chip can sleep until the next grab.
+void ucap_update_measured_data(void) {
+	if (ucap.sensor_valid) {
+		measured_data.temp = ucap.last_temp;           // x0.01 °C
+		measured_data.humi = ucap.last_humi;           // x0.01 % (already in correct unit)
+	} else {
+		// No valid frame yet — report negative debug counters
+		measured_data.temp = -(int16_t)(ucap.good_frames ? ucap.good_frames : 1);
+		measured_data.humi = -(int16_t)(ucap.bad_bytes ? ucap.bad_bytes : 1);
+	}
+	// Release UART lock — chip can sleep until next grab window
+	if (ucap.uart_inited)
+		hal_pwrmgr_unlock(MOD_UART0);
+}
+
+#else // !DEVICE_IBSTH2P — V7 scan infrastructure for other devices
+
+enum {
+	SCAN_OP_START = 0,
+	SCAN_OP_GET_CHUNK = 1,
+	SCAN_OP_GET_SUMMARY = 2,
+	SCAN_OP_ABORT = 3
+};
+
+enum {
+	SCAN_STATUS_OK = 0,
+	SCAN_STATUS_BUSY = 1,
+	SCAN_STATUS_BAD_ARG = 2,
+	SCAN_STATUS_TIMEOUT = 3,
+	SCAN_STATUS_ABORTED = 4,
+	SCAN_STATUS_INTERNAL = 5
+};
+
+enum {
+	SCAN_PHASE_IDLE = 0,
+	SCAN_PHASE_GPIO = 1,
+	SCAN_PHASE_I2C = 2,
+	SCAN_PHASE_UART = 3,
+	SCAN_PHASE_SPI = 4,
+	SCAN_PHASE_IDENTIFY = 5,
+	SCAN_PHASE_DONE = 6
+};
+
+enum {
+	SCAN_REC_PIN_FP = 1,
+	SCAN_REC_I2C_ACK = 2,
+	SCAN_REC_UART_STAT = 3,
+	SCAN_REC_SPI_STAT = 4,
+	SCAN_REC_ID_MATCH = 5,
+	SCAN_REC_SUMMARY = 6
+};
+
+#define SCAN_MAX_CHUNKS		60
+#define SCAN_MAX_PAYLOAD	24
+
+typedef struct {
+	uint8_t record_type;
+	uint8_t record_count;
+	uint8_t payload_len;
+	uint8_t payload[SCAN_MAX_PAYLOAD];
+} scan_chunk_t;
+
+typedef struct {
+	uint8_t active;
+	uint8_t mode;
+	uint8_t scan_id;
+	uint8_t phase;
+	uint8_t total_chunks;
+	uint8_t summary_chunk;
+	scan_chunk_t chunks[SCAN_MAX_CHUNKS];
+} scan_state_t;
+
+static scan_state_t g_scan_state;
+
+// Forward declarations
+static void scan_add_chunk(uint8_t rec_type, uint8_t rec_count, const uint8_t *payload, uint8_t payload_len);
+
+// Frame-comparing UART listener (V7)
+#define UART_FRAME_MARKER_MIN 0xa0
+#define FCOMP_MAX_FRAME_LEN 24
+#define FCOMP_MAX_DIFFS 4
+
+typedef struct {
+	uint8_t ref_frame[FCOMP_MAX_FRAME_LEN];
+	uint8_t ref_len;
+	uint8_t diff_frames[FCOMP_MAX_DIFFS][FCOMP_MAX_FRAME_LEN];
+	uint8_t diff_lens[FCOMP_MAX_DIFFS];
+	uint16_t diff_at[FCOMP_MAX_DIFFS];
+	uint8_t cur_frame[FCOMP_MAX_FRAME_LEN];
+	uint8_t cur_pos;
+	uint16_t total_frames;
+	uint8_t num_diffs;
+	uint8_t in_frame;
+	volatile uint8_t frame_ready; // set by ISR when a full frame completes
+	uint8_t last_frame[FCOMP_MAX_FRAME_LEN]; // copy of last completed frame
+	uint8_t last_len;
+} fcomp_state_t;
+
+static volatile fcomp_state_t fcomp;
+
+static void fcomp_process_frame(void) {
+	uint8_t pos = fcomp.cur_pos;
+	if (pos < 3) return;
+	// Save a copy of the just-completed frame
+	memcpy((void*)fcomp.last_frame, (void*)fcomp.cur_frame, pos);
+	fcomp.last_len = pos;
+	fcomp.frame_ready = 1;
+	fcomp.total_frames++;
+	if (fcomp.ref_len == 0) {
+		memcpy((void*)fcomp.ref_frame, (void*)fcomp.cur_frame, pos);
+		fcomp.ref_len = pos;
+	} else if (fcomp.num_diffs < FCOMP_MAX_DIFFS) {
+		uint8_t differs = (pos != fcomp.ref_len);
+		if (!differs)
+			differs = memcmp((void*)fcomp.ref_frame, (void*)fcomp.cur_frame, pos) != 0;
+		if (differs) {
+			uint8_t idx = fcomp.num_diffs;
+			memcpy((void*)fcomp.diff_frames[idx], (void*)fcomp.cur_frame, pos);
+			fcomp.diff_lens[idx] = pos;
+			fcomp.diff_at[idx] = fcomp.total_frames;
+			fcomp.num_diffs++;
+		}
+	}
+}
+
+static void fcomp_callback(uart_Evt_t *pev) {
+	if (pev->type != UART_EVT_TYPE_RX_DATA && pev->type != UART_EVT_TYPE_RX_DATA_TO)
+		return;
+	for (int i = 0; i < pev->len; i++) {
+		uint8_t b = pev->data[i];
+		if (b >= UART_FRAME_MARKER_MIN) {
+			if (fcomp.in_frame)
+				fcomp_process_frame();
+			fcomp.cur_frame[0] = b;
+			fcomp.cur_pos = 1;
+			fcomp.in_frame = 1;
+		} else if (fcomp.in_frame && fcomp.cur_pos < FCOMP_MAX_FRAME_LEN) {
+			fcomp.cur_frame[fcomp.cur_pos++] = b;
+		}
+	}
+}
+
+static void fcomp_init(void) {
+	memset((void*)&fcomp, 0, sizeof(fcomp));
+}
+
+static void fcomp_reset_diffs(void) {
+	fcomp.total_frames = 0;
+	fcomp.num_diffs = 0;
+	fcomp.in_frame = 0;
+	fcomp.cur_pos = 0;
+}
+
+static int fcomp_uart_init(void) {
+	uart_Cfg_t ucfg;
+	memset(&ucfg, 0, sizeof(ucfg));
+	ucfg.tx_pin = GPIO_P10;
+	ucfg.rx_pin = GPIO_P17;
+	ucfg.baudrate = 9600;
+	ucfg.use_fifo = TRUE;
+	ucfg.hw_fwctrl = FALSE;
+	ucfg.use_tx_buf = FALSE;
+	ucfg.parity = FALSE;
+	ucfg.evt_handler = fcomp_callback;
+	return hal_uart_init(ucfg, UART1);
+}
+
+static void fcomp_listen(uint16_t ms) {
+	uint32_t ticks = ((uint32_t)ms * 32768UL) / 1000UL;
+	WaitRTCCount(ticks);
+}
+
+// Wait for next complete frame (up to timeout_ms). Returns 1 if frame received.
+static uint8_t fcomp_wait_frame(uint16_t timeout_ms) {
+	fcomp.frame_ready = 0;
+	// Poll at ~32μs resolution
+	uint32_t max_ticks = ((uint32_t)timeout_ms * 32768UL) / 1000UL;
+	uint32_t ticks = 0;
+	while (!fcomp.frame_ready && ticks < max_ticks) {
+		WaitRTCCount(1); // ~32μs
+		ticks++;
+	}
+	return fcomp.frame_ready;
+}
+
+// Timed response probe: wait for frame, send response, listen, check for change.
+// Returns num_diffs seen in the listen_ms after sending.
+static uint8_t fcomp_timed_probe(const uint8_t *tx_data, uint8_t tx_len, uint16_t listen_ms) {
+	// Reset diff tracking but keep reference frame from initial listen
+	fcomp_reset_diffs();
+
+	// Wait for a complete heartbeat frame
+	if (!fcomp_wait_frame(200))
+		return 0;
+
+	// Immediately send the response on TX (P10)
+	if (tx_len > 0 && tx_data)
+		hal_uart_send_buff(UART1, (uint8_t *)tx_data, tx_len);
+
+	// Listen for subsequent frames and check if any differ from reference
+	fcomp_listen(listen_ms);
+
+	// Flush any remaining in-progress frame
+	if (fcomp.in_frame && fcomp.cur_pos >= 3)
+		fcomp_process_frame();
+
+	return fcomp.num_diffs;
+}
+
+static int scan_make_response(uint8_t *obuf, uint8_t status, uint8_t op, uint8_t mode,
+		uint8_t scan_id, uint8_t phase, uint8_t total_chunks, uint8_t chunk_idx,
+		uint8_t record_type, uint8_t record_count, const uint8_t *payload, uint8_t payload_len) {
+	obuf[0] = CMD_ID_I2C_SCAN;
+	obuf[1] = status;
+	obuf[2] = op;
+	obuf[3] = mode;
+	obuf[4] = scan_id;
+	obuf[5] = phase;
+	obuf[6] = total_chunks;
+	obuf[7] = chunk_idx;
+	obuf[8] = record_type;
+	obuf[9] = record_count;
+	if (payload_len && payload)
+		memcpy(&obuf[10], payload, payload_len);
+	return payload_len + 10;
+}
+
+#if 0 // V7: GPIO/I2C phases disabled
+static uint8_t scan_pin_class(uint8_t f, uint8_t pu, uint8_t pd) {
+	if (pu && !pd)
+		return 1; // driven/pulled high
+	if (!pu && pd)
+		return 2; // driven/pulled low
+	if (!f && !pu && !pd)
+		return 0; // floating/unknown
+	return 3; // unstable/mixed
+}
+
+static void scan_sample_pin(gpio_pin_e pin, uint8_t out[8]) {
+	uint8_t f, pu, pd;
+	hal_gpio_pin_init(pin, GPIO_INPUT);
+	hal_gpio_pull_set(pin, GPIO_FLOATING);
+	WaitRTCCount(64);
+	f = hal_gpio_read(pin) ? 1 : 0;
+	hal_gpio_pull_set(pin, GPIO_PULL_UP);
+	WaitRTCCount(64);
+	pu = hal_gpio_read(pin) ? 1 : 0;
+	hal_gpio_pull_set(pin, GPIO_PULL_DOWN);
+	WaitRTCCount(64);
+	pd = hal_gpio_read(pin) ? 1 : 0;
+	hal_gpio_pull_set(pin, GPIO_FLOATING);
+
+	// Activity detection: sample rapidly for ~5ms and count transitions
+	uint8_t transitions = 0;
+	uint8_t prev = hal_gpio_read(pin) ? 1 : 0;
+	for (int s = 0; s < 160; s++) { // ~160 * 32us = ~5ms
+		WaitRTCCount(1);
+		uint8_t cur = hal_gpio_read(pin) ? 1 : 0;
+		if (cur != prev) {
+			if (transitions < 255)
+				transitions++;
+			prev = cur;
+		}
+	}
+
+	out[0] = (uint8_t)pin;
+	out[1] = f;
+	out[2] = pu;
+	out[3] = pd;
+	out[4] = 100 - ((f != pu) + (pu != pd) + (f != pd)) * 33;
+	out[5] = scan_pin_class(f, pu, pd);
+	out[6] = transitions;
+	out[7] = 0; // reserved
+}
+#endif // V7: GPIO scan disabled
+
+static void scan_add_chunk(uint8_t rec_type, uint8_t rec_count, const uint8_t *payload, uint8_t payload_len) {
+	if (g_scan_state.total_chunks >= SCAN_MAX_CHUNKS || payload_len > SCAN_MAX_PAYLOAD)
+		return;
+	scan_chunk_t *c = &g_scan_state.chunks[g_scan_state.total_chunks++];
+	c->record_type = rec_type;
+	c->record_count = rec_count;
+	c->payload_len = payload_len;
+	if (payload_len)
+		memcpy(c->payload, payload, payload_len);
+}
+
+#if 0 // V7: I2C probe disabled
+// Active I2C probe: try to detect devices on a pin pair
+static uint8_t scan_i2c_probe_pair(gpio_pin_e sda, gpio_pin_e scl, uint8_t *found_addrs, uint8_t max_found) {
+	dev_i2c_t i2c_dev;
+	uint8_t count = 0;
+	uint8_t dummy;
+
+	i2c_dev.scl = scl;
+	i2c_dev.sda = sda;
+	i2c_dev.speed = I2C_100KHZ;
+	i2c_dev.i2c_num = 0;
+
+	init_i2c(&i2c_dev);
+
+	for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+		if (read_i2c_nabuf(&i2c_dev, addr, &dummy, 1) == 0) {
+			if (count < max_found)
+				found_addrs[count] = addr;
+			count++;
+		}
+	}
+
+	deinit_i2c(&i2c_dev);
+	return count;
+}
+#endif // V7: GPIO/I2C phases disabled
+
+static void scan_build_report(uint8_t mode, uint8_t scan_id) {
+	uint8_t sensor_type = 0;
+	uint8_t sensor_present = 0;
+
+#if (DEV_SERVICES & SERVICE_THS)
+	sensor_type = thsensor_cfg.sensor_type;
+	sensor_present = (thsensor_cfg.sensor_type != TH_SENSOR_NONE) ? 1 : 0;
+#endif
+
+	memset(&g_scan_state, 0, sizeof(g_scan_state));
+	g_scan_state.active = 1;
+	g_scan_state.mode = mode;
+	g_scan_state.scan_id = scan_id;
+	g_scan_state.phase = SCAN_PHASE_UART; // V6: skip GPIO/I2C, go straight to UART
+
+	// V7: Extended passive listen + Frame-synchronized response probing
+	if (mode >= 1) {
+		g_scan_state.phase = SCAN_PHASE_UART;
+
+		fcomp_init();
+
+		if (fcomp_uart_init() != 0) {
+			uint8_t hdr[4] = { (uint8_t)GPIO_P17, 0, 0, 0xFF };
+			scan_add_chunk(SCAN_REC_UART_STAT, 1, hdr, 4);
+		} else {
+			// --- Phase A: 15-second passive listen ---
+			fcomp_listen(15000);
+
+			// Flush any in-progress frame
+			if (fcomp.in_frame && fcomp.cur_pos >= 3)
+				fcomp_process_frame();
+
+			// Emit reference frame: record type 10
+			{
+				uint8_t rec[SCAN_MAX_PAYLOAD];
+				uint16_t tf = fcomp.total_frames;
+				rec[0] = fcomp.ref_len;
+				rec[1] = tf & 0xFF;
+				rec[2] = (tf >> 8) & 0xFF;
+				rec[3] = fcomp.num_diffs;
+				uint8_t rl = fcomp.ref_len;
+				if (rl > SCAN_MAX_PAYLOAD - 4) rl = SCAN_MAX_PAYLOAD - 4;
+				memcpy(&rec[4], (void*)fcomp.ref_frame, rl);
+				scan_add_chunk(10, 1, rec, 4 + rl);
+			}
+
+			// Emit diff frames: record type 11
+			for (uint8_t di = 0; di < fcomp.num_diffs; di++) {
+				uint8_t rec[SCAN_MAX_PAYLOAD];
+				uint16_t at = fcomp.diff_at[di];
+				rec[0] = di;
+				rec[1] = at & 0xFF;
+				rec[2] = (at >> 8) & 0xFF;
+				rec[3] = fcomp.diff_lens[di];
+				uint8_t dl = fcomp.diff_lens[di];
+				if (dl > SCAN_MAX_PAYLOAD - 4) dl = SCAN_MAX_PAYLOAD - 4;
+				memcpy(&rec[4], (void*)fcomp.diff_frames[di], dl);
+				scan_add_chunk(11, 1, rec, 4 + dl);
+			}
+
+			// --- Phase B: Frame-synchronized response probing ---
+			// Send responses IMMEDIATELY after receiving a complete heartbeat frame.
+			// The original firmware likely replies within a tight timing window.
+			// Try 12 different response patterns.
+			static const uint8_t resp01[] = { 0x01 };
+			static const uint8_t resp02[] = { 0x06 };
+			static const uint8_t resp03[] = { 0xA5, 0x00 };
+			static const uint8_t resp04[] = { 0xA5, 0x01 };
+			static const uint8_t resp05[] = { 0xA4, 0x00 };
+			static const uint8_t resp06[] = { 0xA5, 0x03 };
+			static const uint8_t resp07[] = { 0xA5, 0x04 };
+			static const uint8_t resp08[] = { 0xA5, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+			static const uint8_t resp09[] = { 0xA4, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+			// resp10 (idx=9): echo the reference frame back (built dynamically)
+			// resp11 (idx=10): reference frame with byte[1]=0x01
+			// resp12 (idx=11): 0xA5 0x05 0x01 (possible "request data" command)
+			static const uint8_t resp12[] = { 0xA5, 0x05, 0x01 };
+
+			static const struct {
+				const uint8_t *data;
+				uint8_t len;
+			} timed_resps[] = {
+				{ resp01, 1 },    // 0: ACK byte 0x01
+				{ resp02, 1 },    // 1: ACK byte 0x06
+				{ resp03, 2 },    // 2: A5 00 (marker + null)
+				{ resp04, 2 },    // 3: A5 01 (marker + cmd1)
+				{ resp05, 2 },    // 4: A4 00 (alt marker + null)
+				{ resp06, 2 },    // 5: A5 03 (marker + FC3-like)
+				{ resp07, 2 },    // 6: A5 04 (marker + FC4-like)
+				{ resp08, 8 },    // 7: A5 01 + 6 zeros (longer cmd)
+				{ resp09, 8 },    // 8: A4 01 + 6 zeros (longer cmd)
+				{ NULL, 0 },      // 9: echo reference (dynamic)
+				{ NULL, 0 },      // 10: modified reference (dynamic)
+				{ resp12, 3 },    // 11: A5 05 01 (possible read cmd)
+			};
+
+			uint8_t pi;
+			for (pi = 0; pi < 12; pi++) {
+				const uint8_t *tx_data;
+				uint8_t tx_len;
+				uint8_t dyn_buf[FCOMP_MAX_FRAME_LEN];
+
+				if (pi == 9) {
+					// Echo: send reference frame back
+					tx_data = (uint8_t*)(void*)fcomp.ref_frame;
+					tx_len = fcomp.ref_len;
+				} else if (pi == 10) {
+					// Modified ref: set byte[1] to 0x01
+					memcpy(dyn_buf, (void*)fcomp.ref_frame, fcomp.ref_len);
+					if (fcomp.ref_len > 1) dyn_buf[1] = 0x01;
+					tx_data = dyn_buf;
+					tx_len = fcomp.ref_len;
+				} else {
+					tx_data = timed_resps[pi].data;
+					tx_len = timed_resps[pi].len;
+				}
+
+				uint8_t ndiffs = fcomp_timed_probe(tx_data, tx_len, 300);
+
+				// Emit timed probe result: record type 16
+				// [probe_idx, tx_len, frames_seen_lo, frames_seen_hi, num_diffs, tx_data...]
+				{
+					uint8_t rec[SCAN_MAX_PAYLOAD];
+					uint16_t tf = fcomp.total_frames;
+					rec[0] = pi;
+					rec[1] = tx_len;
+					rec[2] = tf & 0xFF;
+					rec[3] = (tf >> 8) & 0xFF;
+					rec[4] = ndiffs;
+					uint8_t tl = tx_len;
+					if (tl > SCAN_MAX_PAYLOAD - 5) tl = SCAN_MAX_PAYLOAD - 5;
+					if (tl > 0 && tx_data)
+						memcpy(&rec[5], tx_data, tl);
+					scan_add_chunk(16, 1, rec, 5 + tl);
+				}
+
+				// Emit first diff if any: record type 17
+				if (ndiffs > 0 && fcomp.diff_lens[0] > 0) {
+					uint8_t rec[SCAN_MAX_PAYLOAD];
+					rec[0] = pi;
+					rec[1] = fcomp.diff_lens[0];
+					uint8_t dl = fcomp.diff_lens[0];
+					if (dl > SCAN_MAX_PAYLOAD - 2) dl = SCAN_MAX_PAYLOAD - 2;
+					memcpy(&rec[2], (void*)fcomp.diff_frames[0], dl);
+					scan_add_chunk(17, 1, rec, 2 + dl);
+				}
+			}
+
+			hal_uart_deinit(UART1);
+			hal_gpio_pin_init(GPIO_P17, GPIO_INPUT);
+			hal_gpio_pull_set(GPIO_P17, GPIO_FLOATING);
+			hal_gpio_pin_init(GPIO_P10, GPIO_INPUT);
+			hal_gpio_pull_set(GPIO_P10, GPIO_FLOATING);
+		}
+	}
+
+	// Summary
+	{
+		uint8_t summary[8];
+		summary[0] = SCAN_PHASE_UART;
+		summary[1] = (uint8_t)GPIO_P17; // RX pin
+		summary[2] = (uint8_t)GPIO_P10; // TX pin
+		summary[3] = 0;
+		summary[4] = sensor_type;
+		summary[5] = mode;
+		summary[6] = 0;
+		summary[7] = sensor_present;
+		scan_add_chunk(SCAN_REC_SUMMARY, 1, summary, 8);
+		g_scan_state.summary_chunk = g_scan_state.total_chunks - 1;
+	}
+
+	g_scan_state.phase = SCAN_PHASE_DONE;
+}
+
+#endif // DEVICE == DEVICE_IBSTH2P
 
 const dev_id_t dev_id = {
 		.pid = CMD_ID_DEVID,
@@ -440,6 +1086,107 @@ int cmd_parser(uint8_t * obuf, uint8_t * ibuf, uint32_t len) {
 			}
 			olen = gapRole_ScanRspData[0];
 			memcpy(&obuf[1], &gapRole_ScanRspData[2], olen - 1);
+		} else if (cmd == CMD_ID_I2C_SCAN) {
+#if DEVICE == DEVICE_IBSTH2P
+			// V10: UART frame parser stats and debug
+			uint8_t op = (len > 1) ? ibuf[1] : 0;
+			obuf[0] = CMD_ID_I2C_SCAN;
+			if (op == 0) {
+				// Stats dump
+				obuf[1] = 0x0C; // version: V12
+				obuf[2] = ucap.uart_inited;
+				obuf[3] = ucap.sensor_valid;
+				obuf[4] = (ucap.total_bytes) & 0xFF;
+				obuf[5] = (ucap.total_bytes >> 8) & 0xFF;
+				obuf[6] = (ucap.total_bytes >> 16) & 0xFF;
+				obuf[7] = (ucap.total_bytes >> 24) & 0xFF;
+				obuf[8] = ucap.good_frames & 0xFF;
+				obuf[9] = (ucap.good_frames >> 8) & 0xFF;
+				obuf[10] = ucap.bad_bytes & 0xFF;
+				obuf[11] = (ucap.bad_bytes >> 8) & 0xFF;
+				obuf[12] = ucap.last_temp & 0xFF;
+				obuf[13] = (ucap.last_temp >> 8) & 0xFF;
+				obuf[14] = ucap.last_humi & 0xFF;
+				obuf[15] = (ucap.last_humi >> 8) & 0xFF;
+				olen = 16;
+			} else if (op == 1) {
+				// Latest parsed frame debug info
+				obuf[1] = 0x0C; // V12
+				obuf[2] = ucap.last_temp & 0xFF;
+				obuf[3] = (ucap.last_temp >> 8) & 0xFF;
+				obuf[4] = ucap.last_humi & 0xFF;
+				obuf[5] = (ucap.last_humi >> 8) & 0xFF;
+				obuf[6] = ucap.last_byte1;
+				obuf[7] = ucap.last_byte2;
+				obuf[8] = ucap.last_byte9;
+				obuf[9] = ucap.last_flags7;
+				obuf[10] = ucap.last_flags8;
+				olen = 11;
+			} else if (op == 3 && len > 2) {
+				// Read raw captured bytes at offset ibuf[2]
+				uint8_t offset = ibuf[2];
+				obuf[1] = 0x0C;
+				obuf[2] = rawcap_pos;
+				obuf[3] = offset;
+				if (offset < rawcap_pos) {
+					uint8_t copylen = rawcap_pos - offset;
+					if (copylen > 12) copylen = 12;
+					memcpy(&obuf[4], &rawcap_buf[offset], copylen);
+					olen = 4 + copylen;
+				} else {
+					olen = 4;
+				}
+			} else {
+				obuf[1] = 0xFF;
+				olen = 2;
+			}
+#else
+			// V7 scan handler (non-IBSTH2P devices)
+			{
+				uint8_t op = (len > 1) ? ibuf[1] : SCAN_OP_START;
+				uint8_t mode = (len > 2) ? ibuf[2] : 0;
+				uint8_t scan_id = (len > 3) ? ibuf[3] : 0;
+				uint8_t chunk_idx = (len > 4) ? ibuf[4] : 0;
+
+				if (op == SCAN_OP_START) {
+					scan_build_report(mode, scan_id);
+					olen = scan_make_response(obuf, SCAN_STATUS_OK, op, g_scan_state.mode,
+							g_scan_state.scan_id, g_scan_state.phase, g_scan_state.total_chunks,
+							0, 0, 0, NULL, 0);
+				} else if (op == SCAN_OP_GET_CHUNK) {
+					if (!g_scan_state.active || chunk_idx >= g_scan_state.total_chunks) {
+						olen = scan_make_response(obuf, SCAN_STATUS_BAD_ARG, op, g_scan_state.mode,
+								g_scan_state.scan_id, g_scan_state.phase, g_scan_state.total_chunks,
+								chunk_idx, 0, 0, NULL, 0);
+					} else {
+						scan_chunk_t *c = &g_scan_state.chunks[chunk_idx];
+						olen = scan_make_response(obuf, SCAN_STATUS_OK, op, g_scan_state.mode,
+								g_scan_state.scan_id, g_scan_state.phase, g_scan_state.total_chunks,
+								chunk_idx, c->record_type, c->record_count,
+								c->payload, c->payload_len);
+					}
+				} else if (op == SCAN_OP_GET_SUMMARY) {
+					if (!g_scan_state.active || g_scan_state.total_chunks == 0) {
+						olen = scan_make_response(obuf, SCAN_STATUS_BAD_ARG, op, g_scan_state.mode,
+								g_scan_state.scan_id, g_scan_state.phase, g_scan_state.total_chunks,
+								0, 0, 0, NULL, 0);
+					} else {
+						scan_chunk_t *c = &g_scan_state.chunks[g_scan_state.summary_chunk];
+						olen = scan_make_response(obuf, SCAN_STATUS_OK, op, g_scan_state.mode,
+								g_scan_state.scan_id, g_scan_state.phase, g_scan_state.total_chunks,
+								g_scan_state.summary_chunk, c->record_type, c->record_count,
+								c->payload, c->payload_len);
+					}
+				} else if (op == SCAN_OP_ABORT) {
+					memset(&g_scan_state, 0, sizeof(g_scan_state));
+					olen = scan_make_response(obuf, SCAN_STATUS_ABORTED, op, mode,
+							scan_id, SCAN_PHASE_IDLE, 0, 0, 0, 0, NULL, 0);
+				} else {
+					olen = scan_make_response(obuf, SCAN_STATUS_BAD_ARG, op, mode,
+							scan_id, SCAN_PHASE_IDLE, 0, 0, 0, 0, NULL, 0);
+				}
+			}
+#endif // DEVICE == DEVICE_IBSTH2P
 
 //---------- Debug commands (unsupported in different versions!):
 

@@ -106,7 +106,9 @@
 #define OTA_TYPE	OTA_TYPE_APP
 #endif
 
-#if OTA_TYPE == OTA_TYPE_BOOT
+#if DEVICE == DEVICE_IBSTH2P
+#define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'V', '1', '2', 0}
+#elif OTA_TYPE == OTA_TYPE_BOOT
 #define DEF_SOFTWARE_REVISION	{'B', '0'+ (APP_VERSION >> 4), '.' , '0'+ (APP_VERSION & 0x0F), 0}
 #else
 #define DEF_SOFTWARE_REVISION	{'V', '0'+ (APP_VERSION >> 4), '.' , '0'+ (APP_VERSION & 0x0F), 0}
@@ -156,7 +158,7 @@
   /* Inkbird IBS-TH2 Plus */
 
 #if OTA_TYPE == OTA_TYPE_BOOT
-#define DEV_SERVICES (OTA_TYPE | SERVICE_KEY)
+#define DEV_SERVICES (OTA_TYPE | SERVICE_THS | SERVICE_KEY)
 #else
 #define DEV_SERVICES (OTA_TYPE \
 		| SERVICE_SCREEN \
@@ -184,6 +186,10 @@
 #define GPIO_TRG	GPIO_P20 // mark TX2
 #define GPIO_INP	GPIO_P18 // mark RX2
 */
+// I2C pins needed for compilation (no I2C sensor on IBSTH2P)
+#define I2C_SDA 	GPIO_P33
+#define I2C_SCL 	GPIO_P34
+
 // just here to compile
 #define ADC_PIN_USE_OUT		1
 #define ADC_PIN				GPIO_P11

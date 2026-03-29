@@ -2,7 +2,9 @@
 
 ## Project overview
 - I'm attempting to utilize this repository for developing custom firmware for Inkbird IBS-TH2 Plus. It also has a Phy6222 IC, but it currently only uses it for BLE advertising. I want to use the existing code here to do the following:
-  - Get it to advertise using the BTHome format
+  - Get it to advertise using the BTHome format [done]
+    - I made a fork that adds DEVICE_IBSTH2P for this purpose
+    - I set it to always stay in BOOT mode
   - Get OTA updating to work
   - Get it to read temperature and humidity from the existing sensors
 - Firmware is split into two binaries: FW Boot (minimal, handles OTA) and FW App (full features). Boot/App use different linker scripts and OTA modes.

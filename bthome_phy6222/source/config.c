@@ -162,8 +162,12 @@ void test_config(void) {
 		cfg.advertising_interval = 1;
 //	else if(cfg.advertising_interval > 160)
 //		cfg.advertising_interval = 160;
+#if DEVICE == DEVICE_IBSTH2P
+	cfg.measure_interval = 60;  // 5 sec × 60 = 5 min between measurements
+#else
 	if(cfg.measure_interval < 2)
 		cfg.measure_interval = 2;
+#endif
 	adv_wrk.measure_interval_ms = (cfg.advertising_interval * cfg.measure_interval * 625) / 10;
 	if(cfg.adv_event_cnt < 6)
 		cfg.adv_event_cnt = 16;
