@@ -41,7 +41,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 DEFAULT_STOCK_HEX = HERE / "ibs_thx_b_2p7_48M_phy6222.hex16"
 DEFAULT_INSTALLER_HEX = HERE / "build" / "stock_bundle_installer" / "STOCK_BUNDLE_INSTALLER.hex"
-DEFAULT_FINAL_HEX = ROOT / "bthome_phy6222" / "build_boot_ibsth2p_clean" / "BOOT_IBSTH2P.hex"
+# Default to the hardware-verified V15 image. Callers can still override this
+# with --final-hex when testing a fresh source build.
+DEFAULT_FINAL_HEX = HERE / "BOOT_IBSTH2P_v15.hex"
 DEFAULT_OUTPUT_HEX = HERE / "STAGE3_IBSTH2P_stock_bundle_installer.hex16"
 DEFAULT_PAYLOAD_BIN = HERE / "STAGE3_IBSTH2P_stock_bundle_payload.bin"
 
@@ -293,7 +295,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stock-hex", type=Path, default=DEFAULT_STOCK_HEX)
     parser.add_argument("--installer-hex", type=Path, default=DEFAULT_INSTALLER_HEX)
-    parser.add_argument("--final-hex", type=Path, default=DEFAULT_FINAL_HEX)
+    parser.add_argument(
+        "--final-hex",
+        type=Path,
+        default=DEFAULT_FINAL_HEX,
+        help="final low-flash image to install (default: hardware-verified V15 hex)",
+    )
     parser.add_argument("--output-hex", type=Path, default=DEFAULT_OUTPUT_HEX)
     parser.add_argument("--payload-bin", type=Path, default=DEFAULT_PAYLOAD_BIN)
     parser.add_argument("--staging-addr", type=lambda value: int(value, 0), default=DEFAULT_STAGING_ADDR)
@@ -303,7 +310,7 @@ def main() -> int:
     parser.add_argument(
         "--trace-sentinel",
         action="store_true",
-        help="stage a known marker at 0x1107F000 for post-run installer trace dumps",
+        help=f"stage a known marker at 0x{DEFAULT_TRACE_SENTINEL_ADDR:08X} for post-run installer trace dumps",
     )
     args = parser.parse_args()
 

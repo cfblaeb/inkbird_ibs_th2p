@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inkbird IBS-TH2 Plus — SHB OTA Flasher</title>
+<style>
+body { font-family: Arial, sans-serif; max-width: 700px; margin: 20px auto; padding: 0 16px; color: #1a1a2e; background: #f8f9fa; }
+h1 { text-align: center; font-size: 22px; margin-bottom: 4px; }
+.subtitle { text-align: center; color: #666; font-size: 13px; margin-bottom: 20px; }
+.version { text-align: center; color: #8a5a00; font-size: 12px; margin: -12px 0 16px; font-family: 'Courier New', monospace; }
+.section { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px #0002; }
+.section h2 { font-size: 15px; margin: 0 0 10px; color: #333; }
+button { background: #1a73e8; color: #fff; border: none; border-radius: 4px; padding: 8px 20px; font-size: 14px; cursor: pointer; margin: 4px; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.danger { background: #d93025; }
+button.green { background: #1e8e3e; }
+input[type="file"] { margin: 4px 0; }
+.progress-wrap { background: #e0e0e0; border-radius: 4px; height: 22px; margin: 8px 0; overflow: hidden; display: none; }
+.progress-bar { background: #1a73e8; height: 100%; width: 0%; transition: width 0.2s; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 12px; font-weight: bold; min-width: 30px; }
+#log { background: #1a1a2e; color: #0f0; font-family: 'Courier New', monospace; font-size: 12px; padding: 10px; border-radius: 6px; height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+.status { font-weight: bold; padding: 6px 10px; border-radius: 4px; margin: 6px 0; display: inline-block; }
+.status.idle { background: #e8eaed; color: #555; }
+.status.active { background: #e8f5e9; color: #1b5e20; }
+.status.error { background: #fce4ec; color: #b71c1c; }
+.info { font-size: 12px; color: #888; margin-top: 4px; }
+table { width: 100%; font-size: 13px; border-collapse: collapse; }
+td { padding: 3px 6px; }
+td:first-child { color: #666; width: 120px; }
+</style>
+</head>
+<body>
+<h1>Inkbird IBS-TH2 Plus OTA</h1>
+<div class="subtitle">SHB OTA Flasher via Web Bluetooth</div>
+<div id="versionTag" class="version"></div>
+
+<div class="section">
+  <h2>1. Load Firmware</h2>
+  <input type="file" id="fileInput" accept=".hex,.hex16">
+  <div id="fileInfo" class="info"></div>
+</div>
+
+<div class="section">
+  <h2>2. Connect &amp; Flash</h2>
+  <button id="btnConnect" onclick="connectAndFlash()">Connect &amp; Flash</button>
+  <button id="btnReconnect" onclick="reconnectOTA()" class="green">Connect to PPLUSOTA</button>
+  <button id="btnAbort" onclick="abort()" class="danger" disabled>Abort</button>
+  <br>
+  <span id="statusBadge" class="status idle">Idle</span>
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-bar" id="progressBar">0%</div>
+  </div>
+  <div id="partInfo"></div>
+</div>
+
+<div class="section">
+  <h2>Log</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+"use strict";
+
+const JS_VERSION = "2026-04-11a";
+
+// ── BLE UUIDs ──
+const SHB_SERVICE   = "5833ff01-9b8b-5191-6142-22a4536ef123";
+const SHB_CMD_CHAR  = "5833ff02-9b8b-5191-6142-22a4536ef123";
+const SHB_NTF_CHAR  = "5833ff03-9b8b-5191-6142-22a4536ef123";
+const SHB_DATA_CHAR = "5833ff04-9b8b-5191-6142-22a4536ef123";
+
+// ── State ──
+let gattServer = null;
+let cmdChar = null;
+let ntfChar = null;
+let dataChar = null;
+let aborted = false;
+let firmwarePartitions = null; // [{address: number, data: Uint8Array}, ...]
+let totalBytes = 0;
+let sentBytes = 0;
+let pendingReconnect = null; // resolve function for reconnect button
+let firmwareIssues = [];
+
+const STOCK_OTA_FLASH_BASE = 0x11000000;
+const STOCK_OTA_FLASH_END = 0x110FFFFF;
+const STOCK_OTA_BOOTINFO_ADDR = 0x11003000;
+const STOCK_OTA_BOOTINFO_SIZE = 0x1000;
+const STOCK_OTA_MAX_PARTITIONS = 32;
+const STOCK_OTA_PART_SPLIT_SIZE = 16 * 1024;
+
+// ── UI helpers ──
+const $ = id => document.getElementById(id);
+const logEl = $("log");
+
+function log(msg) {
+  const ts = new Date().toLocaleTimeString("en-GB", {hour12: false, hour:"2-digit", minute:"2-digit", second:"2-digit"});
+  logEl.textContent += `[${ts}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function showVersionTag() {
+  const el = $("versionTag");
+  if (!el) return;
+  el.textContent = `JavaScript version: ${JS_VERSION}`;
+}
+
+function setStatus(text, cls) {
+  const el = $("statusBadge");
+  el.textContent = text;
+  el.className = "status " + cls;
+}
+
+function setProgress(frac) {
+  const pct = Math.round(frac * 100);
+  $("progressBar").style.width = pct + "%";
+  $("progressBar").textContent = pct + "%";
+}
+
+function showProgress(show) {
+  $("progressWrap").style.display = show ? "block" : "none";
+}
+
+function setButtons(connecting) {
+  $("btnConnect").disabled = connecting;
+  $("btnAbort").disabled = !connecting;
+}
+
+// ── Intel HEX parser ──
+function parseIntelHex(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.startsWith(":"));
+  let highAddr = 0;
+  let partitions = [];
+  let curAddr = null;
+  let curData = [];
+
+  function flushPartition() {
+    if (curAddr !== null && curData.length > 0) {
+      partitions.push({ address: curAddr, data: new Uint8Array(curData) });
+    }
+    curAddr = null;
+    curData = [];
+  }
+
+  for (const line of lines) {
+    const byteCount = parseInt(line.substring(1, 3), 16);
+    const addr = parseInt(line.substring(3, 7), 16);
+    const recType = parseInt(line.substring(7, 9), 16);
+    const dataHex = line.substring(9, 9 + byteCount * 2);
+
+    if (recType === 0x04) { // Extended Linear Address
+      flushPartition();
+      highAddr = parseInt(dataHex, 16) << 16;
+    } else if (recType === 0x00) { // Data
+      const fullAddr = highAddr + addr;
+      if (curAddr === null) {
+        curAddr = fullAddr;
+      } else if (fullAddr !== curAddr + curData.length) {
+        // Non-contiguous — new partition
+        flushPartition();
+        curAddr = fullAddr;
+      }
+      for (let i = 0; i < dataHex.length; i += 2) {
+        curData.push(parseInt(dataHex.substring(i, i + 2), 16));
+      }
+    } else if (recType === 0x01 || recType === 0x05) {
+      // EOF or Start Linear Address — stop
+      break;
+    }
+  }
+  flushPartition();
+  return partitions;
+}
+
+// ── CRC-16 (polynomial 0xA001, init 0) ──
+function crc16(data) {
+  let crc = 0;
+  for (let i = 0; i < data.length; i++) {
+    crc ^= data[i];
+    for (let j = 0; j < 8; j++) {
+      if (crc & 1) crc = (crc >>> 1) ^ 0xA001;
+      else crc = crc >>> 1;
+    }
+  }
+  return crc & 0xFFFF;
+}
+
+// ── Hex formatting helpers ──
+function hex(val, bytes) {
+  return val.toString(16).padStart(bytes * 2, "0").toUpperCase();
+}
+
+function uint32LE(val) {
+  return new Uint8Array([val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >> 24) & 0xFF]);
+}
+
+function uint16LE(val) {
+  return new Uint8Array([val & 0xFF, (val >> 8) & 0xFF]);
+}
+
+function pplusErrorName(code) {
+  const m = {
+    0x06: "INVALID_PARAM",
+    0x07: "INVALID_STATE",
+    0x08: "INVALID_LENGTH",
+    0x0A: "INVALID_DATA",
+    0x0B: "DATA_SIZE",
+    0x10: "INVALID_ADDR",
+    0x64: "OTA_INVALID_STATE",
+    0x65: "OTA_DATA_SIZE",
+    0x66: "OTA_CRC",
+    0x67: "OTA_NO_APP",
+    0x68: "OTA_BAD_DATA",
+    0x69: "OTA_UNKNOWN_CMD",
+    0x6A: "OTA_CRYPTO"
+  };
+  return m[code] || "UNKNOWN";
+}
+
+function overlaps(startA, endA, startB, endB) {
+  return startA < endB && startB < endA;
+}
+
+function bytesEqual(left, right) {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i++) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function pad4(data) {
+  const rem = data.length % 4;
+  if (rem === 0) return data;
+  const padded = new Uint8Array(data.length + (4 - rem));
+  padded.set(data);
+  padded.fill(0xFF, data.length);
+  return padded;
+}
+
+function splitPartitionsForStockOta(partitions) {
+  const out = [];
+  for (const part of partitions) {
+    if (part.data.length <= STOCK_OTA_PART_SPLIT_SIZE) {
+      out.push({ address: part.address, data: pad4(part.data) });
+      continue;
+    }
+    let offset = 0;
+    while (offset < part.data.length) {
+      const nextOffset = Math.min(offset + STOCK_OTA_PART_SPLIT_SIZE, part.data.length);
+      out.push({
+        address: part.address + offset,
+        data: pad4(part.data.slice(offset, nextOffset))
+      });
+      offset = nextOffset;
+    }
+  }
+  return out;
+}
+
+function analyzeFirmwareForStockOta(partitions) {
+  const issues = [];
+  if (partitions.length > STOCK_OTA_MAX_PARTITIONS) {
+    issues.push(`Image expands to ${partitions.length} OTA partitions, exceeding stock OTA limit ${STOCK_OTA_MAX_PARTITIONS}.`);
+  }
+
+  partitions.forEach((part, index) => {
+    const start = part.address;
+    const end = part.address + part.data.length;
+    const isXip = start >= STOCK_OTA_FLASH_BASE && start <= STOCK_OTA_FLASH_END;
+    if (isXip && overlaps(start, end, STOCK_OTA_BOOTINFO_ADDR, STOCK_OTA_BOOTINFO_ADDR + STOCK_OTA_BOOTINFO_SIZE)) {
+      issues.push(`Partition ${index} overlaps stock OTA boot-info sector 0x${hex(STOCK_OTA_BOOTINFO_ADDR, 4)}-0x${hex(STOCK_OTA_BOOTINFO_ADDR + STOCK_OTA_BOOTINFO_SIZE - 1, 4)}; stock OTA erases that sector to write metadata after flashing.`);
+    }
+  });
+
+  return issues;
+}
+
+function ensureFirmwareEligibleForStockOta() {
+  if (!firmwarePartitions || firmwarePartitions.length === 0) {
+    log("ERROR: Load a firmware file first");
+    return false;
+  }
+  if (firmwareIssues.length) {
+    for (const issue of firmwareIssues) {
+      log(`ERROR: ${issue}`);
+    }
+    setStatus("Unsupported image", "error");
+    return false;
+  }
+  return true;
+}
+
+// ── File input handler ──
+$("fileInput").addEventListener("change", function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  $("partInfo").textContent = "";
+  const reader = new FileReader();
+  reader.onload = function() {
+    try {
+      const rawPartitions = parseIntelHex(reader.result);
+      firmwarePartitions = splitPartitionsForStockOta(rawPartitions);
+      firmwareIssues = analyzeFirmwareForStockOta(firmwarePartitions);
+      totalBytes = firmwarePartitions.reduce((s, p) => s + p.data.length, 0);
+      let info = `<b>${file.name}</b> — ${firmwarePartitions.length} partition(s), ${totalBytes.toLocaleString()} bytes total<br><table>`;
+      firmwarePartitions.forEach((p, i) => {
+        info += `<tr><td>Partition ${i}</td><td>0x${hex(p.address, 4)} — 0x${hex(p.address + p.data.length, 4)}</td><td>${p.data.length.toLocaleString()} B</td></tr>`;
+      });
+      info += "</table>";
+      if (rawPartitions.length !== firmwarePartitions.length) {
+        info += `<div style="color:#8a5a00; margin-top:8px">Split ${rawPartitions.length} input partition(s) into ${firmwarePartitions.length} OTA partition(s) to fit the stock OTA staging buffer.</div>`;
+      }
+      if (firmwareIssues.length) {
+        info += `<div style="color:#b71c1c; margin-top:8px"><b>Stock OTA incompatible:</b><br>${firmwareIssues.map(issue => issue.replace(/</g, "&lt;")).join("<br>")}</div>`;
+      }
+      $("fileInfo").innerHTML = info;
+      log(`Loaded ${file.name}: ${firmwarePartitions.length} partitions, ${totalBytes} bytes`);
+      if (rawPartitions.length !== firmwarePartitions.length) {
+        log(`Split raw image into ${firmwarePartitions.length} OTA partitions to satisfy stock OTA size limits.`);
+      }
+      for (const issue of firmwareIssues) {
+        log(`WARNING: ${issue}`);
+      }
+    } catch (err) {
+      $("fileInfo").innerHTML = `<span style="color:red">Parse error: ${err.message}</span>`;
+      firmwarePartitions = null;
+      firmwareIssues = [];
+      log("ERROR: " + err.message);
+    }
+  };
+  reader.readAsText(file);
+});
+
+showVersionTag();
+log(`UI JavaScript version ${JS_VERSION}`);
+
+// ── Abort handler ──
+function abort() {
+  aborted = true;
+  log("Aborting...");
+  setStatus("Aborted", "error");
+  try { if (gattServer && gattServer.connected) gattServer.disconnect(); } catch(e) {}
+  cleanup();
+}
+
+function cleanup() {
+  gattServer = null;
+  cmdChar = null;
+  ntfChar = null;
+  dataChar = null;
+  setButtons(false);
+  showProgress(false);
+  $("partInfo").textContent = "";
+}
+
+// ── Promise-based notification waiter ──
+function waitForNotification(timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    function handler(event) {
+      clearTimeout(timer);
+      ntfChar.removeEventListener("characteristicvaluechanged", handler);
+      // MUST respect DataView's byteOffset/byteLength — Chrome reuses the backing ArrayBuffer
+      const dv = event.target.value;
+      const raw = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      // Copy so later notifications cannot mutate this response via shared buffers.
+      const v = new Uint8Array(raw);
+      resolve(v);
+    }
+    ntfChar.addEventListener("characteristicvaluechanged", handler);
+    timer = setTimeout(() => {
+      ntfChar.removeEventListener("characteristicvaluechanged", handler);
+      reject(new Error("Notification timeout"));
+    }, timeoutMs);
+  });
+}
+
+// ── Reconnect button handler ──
+async function reconnectOTA() {
+  try {
+    const requestOptions = pendingReconnect
+      ? {
+          filters: [{ namePrefix: "PPlusOTA" }],
+          optionalServices: [SHB_SERVICE]
+        }
+      : {
+          filters: [{ namePrefix: "PPlusOTA" }],
+          optionalServices: [SHB_SERVICE]
+        };
+
+    const otaDevice = await navigator.bluetooth.requestDevice(requestOptions);
+    if (pendingReconnect) {
+      // Mode switch flow — hand device back to connectAndFlash()
+      pendingReconnect(otaDevice);
+    } else {
+      // Direct connect — start OTA from here
+      await directOTA(otaDevice);
+    }
+  } catch (e) {
+    if (pendingReconnect) {
+      log("ERROR: PPlusOTA was not selected. If it is not visible in the picker, the mode switch likely failed.");
+    }
+    log("ERROR: " + e.message);
+    setStatus("Error selecting device", "error");
+  }
+}
+
+// ── SHB OTA upload (shared by both entry points) ──
+// Requires cmdChar, ntfChar, dataChar to be connected already.
+async function doSHBUpload() {
+  setStatus("Flashing...", "active");
+  log("Enabling notifications on FF03...");
+  await ntfChar.startNotifications();
+
+  const props = dataChar.properties;
+  log(`Data char properties: write=${props.write}, writeWithoutResponse=${props.writeWithoutResponse}`);
+  const useWWR = props.writeWithoutResponse;
+  const writeSize = 20;
+
+  const numPartitions = firmwarePartitions.length;
+
+  // ── Step 1: Send partition count with hispeed burst ──
+  // Byte[2]=0xFF tells the device to use hispeed mode (burst_size=0xFFFF).
+  // This disables per-block ACKs; the device only notifies on partition complete.
+  // Required because Chrome may negotiate a large MTU but we can only write 20 bytes,
+  // making the exact burst-size equality check impossible to satisfy.
+  log(`Sending partition count: ${numPartitions} (hispeed burst mode)`);
+  const partCountCmd = new Uint8Array([0x01, numPartitions, 0xFF]);
+  const ntfPartCount = waitForNotification(10000);
+  await cmdChar.writeValueWithResponse(partCountCmd);
+  let resp = await ntfPartCount;
+  log(`  Response: ${Array.from(resp).map(b => hex(b,1)).join(" ")}`);
+  if (resp[0] !== 0x00 || resp[1] !== 0x81) {
+    throw new Error(`Unexpected partition count response: ${Array.from(resp).map(b=>hex(b,1)).join(" ")}`);
+  }
+
+  // ── Inkbird IBS-TH2P legacy staged-bank patch ──
+  // Older APP-bridge experiments used an injected trampoline at bank offset
+  // 0x20BC. Current stock-runtime analysis no longer treats that location as
+  // the canonical boot branch target, so this patch is legacy-only. Apply it
+  // only to older images whose staged bank does not already contain the stock
+  // helper sequence.
+  {
+    const TRAMPOLINE_BANK_OFFSET = 0x20BC;
+    const TRAMPOLINE_BYTES = new Uint8Array([0x00, 0x48, 0x00, 0x47, 0xC5, 0xA2, 0x00, 0x11]);
+    const STOCK_RUNAPP_BYTES = new Uint8Array([0xC0, 0x0B, 0x08, 0x22, 0x91, 0x43, 0xE1, 0x61]);
+    const STOCK_OTA_SRAM_GAP = 8;
+    let bankOffset = 0;
+    let patched = false;
+
+    for (const part of firmwarePartitions) {
+      const isXip = part.address > 0x11000000 && part.address < 0x110FFFFF;
+      if (isXip) continue;
+      const partEnd = bankOffset + part.data.length;
+      if (bankOffset <= TRAMPOLINE_BANK_OFFSET && TRAMPOLINE_BANK_OFFSET + TRAMPOLINE_BYTES.length <= partEnd) {
+        const localOff = TRAMPOLINE_BANK_OFFSET - bankOffset;
+        const current = part.data.slice(localOff, localOff + TRAMPOLINE_BYTES.length);
+
+        if (bytesEqual(current, STOCK_RUNAPP_BYTES)) {
+          log(`Preserved stock helper bytes at bank offset 0x${TRAMPOLINE_BANK_OFFSET.toString(16)}; skipping legacy trampoline patch.`);
+          patched = true;
+          break;
+        }
+
+        if (bytesEqual(current, TRAMPOLINE_BYTES)) {
+          log(`Legacy trampoline already present at bank offset 0x${TRAMPOLINE_BANK_OFFSET.toString(16)}.`);
+          patched = true;
+          break;
+        }
+
+        const nextData = new Uint8Array(part.data);
+        nextData.set(TRAMPOLINE_BYTES, localOff);
+        part.data = nextData;
+        log(`Patched legacy staged-bank 0x20BC trampoline at bank offset 0x${TRAMPOLINE_BANK_OFFSET.toString(16)} (partition flash+0x${localOff.toString(16)})`);
+        patched = true;
+        break;
+      }
+      bankOffset += part.data.length + STOCK_OTA_SRAM_GAP;
+    }
+
+    if (!patched) {
+      log(`No staged SRAM bytes cover bank offset 0x${TRAMPOLINE_BANK_OFFSET.toString(16)}; skipping legacy staged-bank trampoline patch.`);
+    }
+  }
+
+  // ── Step 2: Flash each partition ──
+  let nonXipFlashOffset = 0;
+  const otaFlashBase = 0x11000000;
+  const otaFlashEnd = 0x110FFFFF;
+  const stockOtaSramGap = 8;
+
+  for (let pi = 0; pi < numPartitions; pi++) {
+    if (aborted) throw new Error("Aborted");
+
+    const part = firmwarePartitions[pi];
+    const runAddr = part.address;
+    const partData = part.data;
+    const partLen = partData.length;
+    const partCRC = crc16(partData);
+
+    // SDK rule (otam_protocol.c):
+    // - XIP partitions: flash_addr = run_addr (absolute flash address)
+    // - SRAM partitions: flash_addr = offset in OTA staging area (not absolute)
+    const isXip = runAddr > otaFlashBase && runAddr < otaFlashEnd;
+    const flashAddrForCmd = isXip ? runAddr : nonXipFlashOffset;
+
+    log(`Partition ${pi}: runAddr=0x${hex(runAddr,4)} flashAddr=0x${hex(flashAddrForCmd,4)} size=${partLen} crc=0x${hex(partCRC,2)} (${isXip ? "XIP" : "SRAM"})`);
+
+    const partInfoCmd = new Uint8Array(16);
+    partInfoCmd[0] = 0x02;
+    partInfoCmd[1] = pi;
+    partInfoCmd.set(uint32LE(flashAddrForCmd), 2);
+    partInfoCmd.set(uint32LE(runAddr), 6);
+    partInfoCmd.set(uint32LE(partLen), 10);
+    partInfoCmd.set(uint16LE(partCRC), 14);
+
+    log(`  Sending partition info...`);
+    let ntfPartInfo = waitForNotification(10000);
+    await cmdChar.writeValueWithResponse(partInfoCmd);
+    resp = await ntfPartInfo;
+    log(`  Response: ${Array.from(resp).map(b => hex(b,1)).join(" ")}`);
+
+    if (resp[0] === 0x00 && resp[1] === 0x89) {
+      log(`  Got retry (0089), resending partition info...`);
+      ntfPartInfo = waitForNotification(10000);
+      await cmdChar.writeValueWithResponse(partInfoCmd);
+      resp = await ntfPartInfo;
+      log(`  Retry response: ${Array.from(resp).map(b => hex(b,1)).join(" ")}`);
+    }
+
+    if (resp.length === 1) {
+      throw new Error(`Partition ${pi} info rejected: err=0x${hex(resp[0],1)} (${pplusErrorName(resp[0])})`);
+    }
+
+    if (resp[0] !== 0x00 || resp[1] !== 0x84) {
+      throw new Error(`Unexpected partition info response: ${Array.from(resp).map(b=>hex(b,1)).join(" ")}`);
+    }
+
+    // Short delay after partition info ACK — let device prepare flash sector
+    await new Promise(r => setTimeout(r, 100));
+
+    // ── Stream all partition data (hispeed — no per-block ACKs) ──
+    // In hispeed mode, burst_size=0xFFFF so the per-block ACK never fires.
+    // The device only sends a notification on partition complete (0x85) or error.
+    // Each incoming write restarts the device's block timer, so as long as
+    // writes arrive steadily we won't hit the timeout.
+    const numWrites = Math.ceil(partLen / writeSize);
+    log(`  Streaming ${numWrites} writes (${writeSize} bytes each)...`);
+
+    // Set up the notification listener BEFORE we start writing
+    const ntfPartition = waitForNotification(60000);
+
+    for (let wi = 0; wi < numWrites; wi++) {
+      if (aborted) throw new Error("Aborted");
+      const start = wi * writeSize;
+      const end = Math.min(start + writeSize, partLen);
+      const chunk = partData.slice(start, end);
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          if (useWWR) await dataChar.writeValueWithoutResponse(chunk);
+          else await dataChar.writeValueWithResponse(chunk);
+          break;
+        } catch (e) {
+          if (attempt < 4) {
+            const delay = 100 * (attempt + 1);
+            if (attempt === 0) log(`  Write ${wi}/${numWrites} failed (${e.message}), retrying...`);
+            await new Promise(r => setTimeout(r, delay));
+          } else {
+            throw new Error(`Data write failed at partition ${pi} write ${wi}: ${e.message}`);
+          }
+        }
+      }
+      sentBytes += chunk.length;
+
+      // Update progress every 50 writes to avoid UI overhead
+      if (wi % 50 === 0 || wi === numWrites - 1) {
+        setProgress(sentBytes / totalBytes);
+        $("partInfo").textContent = `Partition ${pi+1}/${numPartitions}: ${Math.round((wi+1)/numWrites*100)}%`;
+      }
+    }
+
+    log(`  All writes sent. Waiting for partition complete...`);
+
+    // Wait for partition-complete notification
+    resp = await ntfPartition;
+    log(`  Response: ${Array.from(resp).map(b => hex(b,1)).join(" ")}`);
+
+    if (resp[1] === 0x85 && resp[0] === 0x00) {
+      log(`  Partition ${pi} complete ✓`);
+    } else if (resp[1] === 0x83 && resp[0] === 0x00) {
+      log(`  All partitions complete (early) ✓`);
+      break;
+    } else if (resp.length === 1) {
+      throw new Error(`Partition ${pi} failed: err=0x${hex(resp[0],1)} (${pplusErrorName(resp[0])})`);
+    } else {
+      throw new Error(`Partition ${pi} failed: response ${Array.from(resp).map(b=>hex(b,1)).join(" ")}`);
+    }
+
+    if (!isXip) {
+      // Inkbird's Android OTA library advances SRAM staging by size + 8 for
+      // .hex16 updates, which matches the stock app-bank layout.
+      nonXipFlashOffset += partLen + stockOtaSramGap;
+    }
+  }
+
+  // ── Step 3: Wait for all-done and send finish ──
+  if (!(resp[1] === 0x83 && resp[0] === 0x00)) {
+    log("Waiting for all-partitions-complete notification...");
+    resp = await waitForNotification(15000);
+    log(`Response: ${Array.from(resp).map(b => hex(b,1)).join(" ")}`);
+  }
+
+  if (resp[0] === 0x00 && resp[1] === 0x83) {
+    log("All partitions complete! Sending finish command (0x04)...");
+    try {
+      await cmdChar.writeValueWithResponse(new Uint8Array([0x04]));
+      log("Finish command sent. Device is rebooting.");
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      if (msg.includes("disconnected") || msg.includes("GATT Server is disconnected")) {
+        log("Finish command triggered reboot; disconnect before write response is expected.");
+      } else {
+        throw e;
+      }
+    }
+  } else {
+    log(`WARNING: Expected 0083 but got ${Array.from(resp).map(b=>hex(b,1)).join(" ")}`);
+  }
+
+  setStatus("OTA Complete!", "active");
+  setProgress(1);
+  log("=== OTA FLASH COMPLETE ===");
+}
+
+// ── Direct OTA (connect to PPLUSOTA and flash) ──
+async function directOTA(device) {
+  if (!ensureFirmwareEligibleForStockOta()) {
+    return;
+  }
+  aborted = false;
+  setButtons(true);
+  setStatus("Connecting...", "active");
+  showProgress(true);
+  setProgress(0);
+  sentBytes = 0;
+
+  try {
+    log(`Selected: ${device.name || "unnamed"} (${device.id})`);
+    log("Connecting GATT...");
+    gattServer = await device.gatt.connect();
+    log("Connected. Discovering OTA service...");
+
+    const service = await gattServer.getPrimaryService(SHB_SERVICE);
+    cmdChar = await service.getCharacteristic(SHB_CMD_CHAR);
+    ntfChar = await service.getCharacteristic(SHB_NTF_CHAR);
+    dataChar = await service.getCharacteristic(SHB_DATA_CHAR);
+    log("All OTA characteristics ready (FF02, FF03, FF04).");
+
+    await doSHBUpload();
+  } catch (err) {
+    if (aborted) {
+      log("OTA aborted by user.");
+    } else {
+      log(`ERROR: ${err.message}`);
+      console.error(err);
+      setStatus("Error: " + err.message, "error");
+    }
+  } finally {
+    pendingReconnect = null;
+    try { if (gattServer && gattServer.connected) gattServer.disconnect(); } catch(e) {}
+    cleanup();
+  }
+}
+
+// ── Main OTA flow ──
+async function connectAndFlash() {
+  if (!ensureFirmwareEligibleForStockOta()) {
+    return;
+  }
+  if (typeof navigator.bluetooth === "undefined") {
+    log("ERROR: Web Bluetooth not available. Use Chrome/Edge with HTTPS or localhost.");
+    return;
+  }
+
+  aborted = false;
+  setButtons(true);
+  setStatus("Connecting...", "active");
+  showProgress(true);
+  setProgress(0);
+  sentBytes = 0;
+  let appDevice = null;
+
+  try {
+    // ── Phase 1: Connect to stock device and trigger mode switch ──
+    log("Requesting BLE device with OTA service...");
+    appDevice = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
+      optionalServices: [SHB_SERVICE]
+    });
+    log(`Selected: ${appDevice.name || "unnamed"} (${appDevice.id})`);
+
+    log("Connecting GATT...");
+    gattServer = await appDevice.gatt.connect();
+    log("Connected. Discovering OTA service...");
+
+    const service = await gattServer.getPrimaryService(SHB_SERVICE);
+    const chars = await service.getCharacteristics();
+    const charUUIDs = chars.map(c => c.uuid);
+    log(`Characteristics found: ${charUUIDs.map(u => u.substring(4,8).toUpperCase()).join(", ")}`);
+
+    const hasCmdChar = charUUIDs.includes(SHB_CMD_CHAR);
+    const hasNtfChar = charUUIDs.includes(SHB_NTF_CHAR);
+    const hasDataChar = charUUIDs.includes(SHB_DATA_CHAR);
+
+    if (!hasCmdChar || !hasNtfChar) {
+      throw new Error("Missing required characteristics (FF02/FF03)");
+    }
+
+    if (hasDataChar) {
+      // Already in OTA mode (PPLUSOTA) — skip mode switch
+      log("Device already in OTA mode (FF04 present). Skipping mode switch.");
+      cmdChar = chars.find(c => c.uuid === SHB_CMD_CHAR);
+      ntfChar = chars.find(c => c.uuid === SHB_NTF_CHAR);
+      dataChar = chars.find(c => c.uuid === SHB_DATA_CHAR);
+    } else {
+      // App mode — need mode switch
+      log("Device in App mode. Sending mode switch (0x0102)...");
+      setStatus("Mode switch...", "active");
+
+      const appCmdChar = chars.find(c => c.uuid === SHB_CMD_CHAR);
+
+      // Set up disconnect listener BEFORE sending mode switch
+      const disconnectPromise = new Promise((resolve) => {
+        const onDisconnect = () => {
+          appDevice.removeEventListener("gattserverdisconnected", onDisconnect);
+          resolve();
+        };
+        appDevice.addEventListener("gattserverdisconnected", onDisconnect);
+        setTimeout(resolve, 5000); // Safety timeout
+      });
+
+      // Send mode switch — device will disconnect before the write response arrives,
+      // so the write will throw an error. That's expected — catch and ignore it.
+      try {
+        await appCmdChar.writeValueWithResponse(new Uint8Array([0x01, 0x02]));
+      } catch (e) {
+        log("  (Write error expected during mode switch — device disconnected)");
+      }
+
+      // Wait for disconnect to complete
+      await disconnectPromise;
+      log("Disconnected from App mode device.");
+
+      // ── Phase 1b: Reconnect to PPLUSOTA ──
+      // Web Bluetooth requires a user gesture for requestDevice().
+      // Show a button and wait for the user to click it.
+      setStatus("Click 'Connect to PPLUSOTA'", "active");
+      log("Device rebooted into OTA mode. Click the green button to select PPLUSOTA...");
+      // Wait for user to click the reconnect button
+      const otaDevice = await new Promise((resolve, reject) => {
+        pendingReconnect = resolve;
+        // Also allow abort
+        const check = setInterval(() => {
+          if (aborted) { clearInterval(check); reject(new Error("Aborted")); }
+        }, 200);
+      });
+      log(`Selected OTA device: ${otaDevice.name || "unnamed"}`);
+
+      log("Connecting GATT to OTA device...");
+      gattServer = await otaDevice.gatt.connect();
+      log("Connected to OTA device. Discovering service...");
+
+      const otaService = await gattServer.getPrimaryService(SHB_SERVICE);
+      cmdChar = await otaService.getCharacteristic(SHB_CMD_CHAR);
+      ntfChar = await otaService.getCharacteristic(SHB_NTF_CHAR);
+      dataChar = await otaService.getCharacteristic(SHB_DATA_CHAR);
+      log("All OTA characteristics ready (FF02, FF03, FF04).");
+    }
+
+    if (aborted) throw new Error("Aborted");
+
+    await doSHBUpload();
+
+  } catch (err) {
+    if (aborted) {
+      log("OTA aborted by user.");
+    } else {
+      log(`ERROR: ${err.message}`);
+      console.error(err);
+      setStatus("Error: " + err.message, "error");
+    }
+  } finally {
+    pendingReconnect = null;
+    try { if (gattServer && gattServer.connected) gattServer.disconnect(); } catch(e) {}
+    cleanup();
+  }
+}
+</script>
+</body>
+</html>
