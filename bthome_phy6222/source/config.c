@@ -163,7 +163,9 @@ void test_config(void) {
 //	else if(cfg.advertising_interval > 160)
 //		cfg.advertising_interval = 160;
 #if DEVICE == DEVICE_IBSTH2P
-	cfg.measure_interval = 60;  // 5 sec × 60 = 5 min between measurements
+	// Keep IBSTH2P on a low duty cycle, but stay inside the documented 1..160 range.
+	cfg.advertising_interval = 160; // 160 * 100 * 625us = 10 sec
+	cfg.measure_interval = 30;      // 30 * 10 sec = 5 min between measurements
 #else
 	if(cfg.measure_interval < 2)
 		cfg.measure_interval = 2;

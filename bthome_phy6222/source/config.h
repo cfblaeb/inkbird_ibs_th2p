@@ -107,7 +107,7 @@
 #endif
 
 #if DEVICE == DEVICE_IBSTH2P
-#define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'V', '1', '2', 0}
+#define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'V', '1', '5', 0}
 #elif OTA_TYPE == OTA_TYPE_BOOT
 #define DEF_SOFTWARE_REVISION	{'B', '0'+ (APP_VERSION >> 4), '.' , '0'+ (APP_VERSION & 0x0F), 0}
 #else

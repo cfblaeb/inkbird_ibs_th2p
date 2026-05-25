@@ -159,7 +159,7 @@ int ucap_init(void) {
 
 	uart_Cfg_t cfg;
 	memset(&cfg, 0, sizeof(cfg));
-	cfg.tx_pin = GPIO_P09;
+	cfg.tx_pin = GPIO_DUMMY;
 	cfg.rx_pin = GPIO_P10;
 	cfg.baudrate = 9600;
 	cfg.use_fifo = TRUE;
