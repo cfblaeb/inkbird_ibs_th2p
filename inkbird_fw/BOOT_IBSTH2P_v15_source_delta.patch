@@ -1,0 +1,98 @@
+diff --git tmp/inkbird_variants/v15base/bthome_phy6222/source/cmd_parser.c tmp/inkbird_variants/v15/bthome_phy6222/source/cmd_parser.c
+index aaa1b6d..7c75568 100644
+--- tmp/inkbird_variants/v15base/bthome_phy6222/source/cmd_parser.c
++++ tmp/inkbird_variants/v15/bthome_phy6222/source/cmd_parser.c
+@@ -159,7 +159,7 @@ int ucap_init(void) {
+ 
+ 	uart_Cfg_t cfg;
+ 	memset(&cfg, 0, sizeof(cfg));
+-	cfg.tx_pin = GPIO_P09;
++	cfg.tx_pin = GPIO_DUMMY;
+ 	cfg.rx_pin = GPIO_P10;
+ 	cfg.baudrate = 9600;
+ 	cfg.use_fifo = TRUE;
+diff --git tmp/inkbird_variants/v15base/bthome_phy6222/source/config.c tmp/inkbird_variants/v15/bthome_phy6222/source/config.c
+index 163a333..728001c 100644
+--- tmp/inkbird_variants/v15base/bthome_phy6222/source/config.c
++++ tmp/inkbird_variants/v15/bthome_phy6222/source/config.c
+@@ -163,7 +163,9 @@ void test_config(void) {
+ //	else if(cfg.advertising_interval > 160)
+ //		cfg.advertising_interval = 160;
+ #if DEVICE == DEVICE_IBSTH2P
+-	cfg.measure_interval = 60;  // 5 sec × 60 = 5 min between measurements
++	// Keep IBSTH2P on a low duty cycle, but stay inside the documented 1..160 range.
++	cfg.advertising_interval = 160; // 160 * 100 * 625us = 10 sec
++	cfg.measure_interval = 30;      // 30 * 10 sec = 5 min between measurements
+ #else
+ 	if(cfg.measure_interval < 2)
+ 		cfg.measure_interval = 2;
+diff --git tmp/inkbird_variants/v15base/bthome_phy6222/source/config.h tmp/inkbird_variants/v15/bthome_phy6222/source/config.h
+index b3d7d91..3766822 100644
+--- tmp/inkbird_variants/v15base/bthome_phy6222/source/config.h
++++ tmp/inkbird_variants/v15/bthome_phy6222/source/config.h
+@@ -107,7 +107,7 @@
+ #endif
+ 
+ #if DEVICE == DEVICE_IBSTH2P
+-#define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'V', '1', '2', 0}
++#define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'V', '1', '5', 0}
+ #elif OTA_TYPE == OTA_TYPE_BOOT
+ #define DEF_SOFTWARE_REVISION	{'B', '0'+ (APP_VERSION >> 4), '.' , '0'+ (APP_VERSION & 0x0F), 0}
+ #else
+diff --git tmp/inkbird_variants/v15base/bthome_phy6222/source/main.c tmp/inkbird_variants/v15/bthome_phy6222/source/main.c
+index 6bdca4b..b6a141d 100644
+--- tmp/inkbird_variants/v15base/bthome_phy6222/source/main.c
++++ tmp/inkbird_variants/v15/bthome_phy6222/source/main.c
+@@ -388,29 +388,29 @@ const ioinit_cfg_t ioInit[] = {
+ 		{ GPIO_P34 , GPIO_PULL_DOWN }   // Buzzer
+ 
+ #elif (DEVICE == DEVICE_IBSTH2P)
+-    // V8: UART0 pins for inter-chip communication
+-    { GPIO_P00, GPIO_FLOATING },
+-    { GPIO_P01, GPIO_FLOATING },
+-    { GPIO_P02, GPIO_FLOATING },
+-    { GPIO_P03, GPIO_FLOATING },
+-    { GPIO_P07, GPIO_FLOATING },
+-    { GPIO_P09, GPIO_PULL_UP },   // UART0 TX to main chip (idle-high)
+-    { GPIO_P10, GPIO_PULL_UP },   // UART0 RX from main chip (idle-high)
+-    { GPIO_P11, GPIO_PULL_UP },   // VBat ADC
+-    { GPIO_P14, GPIO_FLOATING },
+-    { GPIO_P15, GPIO_FLOATING },
+-    { GPIO_P16, GPIO_FLOATING },
+-    { GPIO_P17, GPIO_FLOATING },
+-    { GPIO_P18, GPIO_FLOATING },
+-    { GPIO_P20, GPIO_FLOATING },
+-    { GPIO_P23, GPIO_FLOATING },
+-    { GPIO_P24, GPIO_FLOATING },
+-    { GPIO_P25, GPIO_FLOATING },
+-    { GPIO_P26, GPIO_FLOATING },
+-    { GPIO_P31, GPIO_FLOATING },
+-    { GPIO_P32, GPIO_FLOATING },
+-    { GPIO_P33, GPIO_FLOATING },
+-    { GPIO_P34, GPIO_FLOATING }
++	// Pull down unused pins; keep UART RX and VBAT pins biased correctly.
++	{ GPIO_P00, GPIO_PULL_DOWN },
++	{ GPIO_P01, GPIO_PULL_DOWN },
++	{ GPIO_P02, GPIO_PULL_DOWN },
++	{ GPIO_P03, GPIO_PULL_DOWN },
++	{ GPIO_P07, GPIO_PULL_DOWN },
++	{ GPIO_P09, GPIO_PULL_DOWN },
++	{ GPIO_P10, GPIO_PULL_UP },
++	{ GPIO_P11, GPIO_PULL_UP },
++	{ GPIO_P14, GPIO_PULL_DOWN },
++	{ GPIO_P15, GPIO_PULL_DOWN },
++	{ GPIO_P16, GPIO_PULL_DOWN },
++	{ GPIO_P17, GPIO_PULL_DOWN },
++	{ GPIO_P18, GPIO_PULL_DOWN },
++	{ GPIO_P20, GPIO_PULL_DOWN },
++	{ GPIO_P23, GPIO_PULL_DOWN },
++	{ GPIO_P24, GPIO_PULL_DOWN },
++	{ GPIO_P25, GPIO_PULL_DOWN },
++	{ GPIO_P26, GPIO_PULL_DOWN },
++	{ GPIO_P31, GPIO_PULL_DOWN },
++	{ GPIO_P32, GPIO_PULL_DOWN },
++	{ GPIO_P33, GPIO_PULL_DOWN },
++	{ GPIO_P34, GPIO_PULL_DOWN }
+ 
+ #else
+ #error "DEVICE Not released!"
