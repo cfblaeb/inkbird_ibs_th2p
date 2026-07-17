@@ -89,6 +89,10 @@ typedef struct {
 	volatile uint8_t  last_flags8;   // frame[8]
 
 	volatile uint8_t  sensor_valid;
+	// 1 while a grab window is open and the UART power lock is held.
+	// Cleared (and the lock released) by the first good frame, so the
+	// chip sleeps for the rest of the window instead of idling awake.
+	volatile uint8_t  grab_active;
 	uint8_t uart_inited;
 } uart_capture_t;
 
@@ -120,6 +124,15 @@ static void ucap_process_frame(void) {
 	ucap.last_byte9 = f[9];
 	ucap.last_flags7 = f[7];
 	ucap.last_flags8 = f[8];
+
+	// Got a fresh frame: release the UART power lock now so the chip can
+	// sleep for the remainder of the grab window. read_sensors() will
+	// copy the captured values at the end of the window as before.
+	// (hal_pwrmgr_unlock is flag-based and safe from IRQ context.)
+	if (ucap.grab_active) {
+		ucap.grab_active = 0;
+		hal_pwrmgr_unlock(MOD_UART0);
+	}
 }
 
 static void ucap_callback(uart_Evt_t *pev) {
@@ -175,8 +188,10 @@ int ucap_init(void) {
 
 	if (ret == 0) {
 		// Lock UART to capture frames immediately on boot.
-		// Will be unlocked at the first read_sensors() call (~10 sec).
+		// Unlocked by the first good frame, or at the first
+		// read_sensors() call (~10 sec) as a fallback.
 		hal_pwrmgr_lock(MOD_UART0);
+		ucap.grab_active = 1;
 	}
 
 	return ret;
@@ -191,6 +206,9 @@ void ucap_start_grab(void) {
 		hal_uart_deinit(UART0);
 		hal_uart_init(ucap_uart_cfg, UART0);
 		hal_pwrmgr_lock(MOD_UART0);
+		// Open the grab window last: the first good frame after this
+		// point releases the lock early (see ucap_process_frame).
+		ucap.grab_active = 1;
 	}
 }
 
@@ -205,9 +223,13 @@ void ucap_update_measured_data(void) {
 		measured_data.temp = -(int16_t)(ucap.good_frames ? ucap.good_frames : 1);
 		measured_data.humi = -(int16_t)(ucap.bad_bytes ? ucap.bad_bytes : 1);
 	}
-	// Release UART lock — chip can sleep until next grab window
-	if (ucap.uart_inited)
+	// Close the grab window. Normally the first good frame already
+	// released the UART lock; this is the fallback for a window with no
+	// frames (unlock of an already-unlocked module is a harmless no-op).
+	if (ucap.uart_inited) {
+		ucap.grab_active = 0;
 		hal_pwrmgr_unlock(MOD_UART0);
+	}
 }
 
 #else // !DEVICE_IBSTH2P — V7 scan infrastructure for other devices

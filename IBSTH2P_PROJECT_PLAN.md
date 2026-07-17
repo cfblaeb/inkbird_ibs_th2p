@@ -91,6 +91,59 @@ fresh source build intentionally.
 - `ibsth2p-v15-good`: exact clean V15 baseline.
 - `ibsth2p-current-experimental`: preserved pre-cleanup experimental work.
 
+## V16 Battery Candidate (pending hardware validation)
+
+V15 holds the PHY6222 fully awake for one whole advertising interval (10 s)
+every measurement cycle while it waits for a UART frame from the main MCU
+(`hal_pwrmgr_lock(MOD_UART0)` in `ucap_start_grab`, released only at the next
+`read_sensors()`). That awake window is the dominant PHY-side battery cost:
+roughly 10 s awake (~1-2 mA) out of every 300 s, i.e. tens of µA average,
+versus ~2-3 µA for everything else combined.
+
+V16 (`inkbird_fw/BOOT_IBSTH2P_v16.hex`) releases the UART power lock as soon
+as the first complete valid frame is parsed, instead of holding it for the
+full window. If no frame arrives, behavior is identical to V15 (the lock is
+still released at `read_sensors()`), so the failure mode is the status quo.
+Delta is +32 bytes of code, no extra RAM, three touched functions in
+`cmd_parser.c` plus the version string (`IBS-V16`).
+
+Toolchain provenance: with Debian gcc-arm-none-eabi 15:14.2.rel1-1,
+binutils 2.42, newlib 4.5.0.20241231-1, the unmodified source reproduces
+`inkbird_fw/BOOT_IBSTH2P_v15.hex` byte-for-byte; `BOOT_IBSTH2P_v16.hex` is
+that same build plus only the early-unlock change.
+
+Validation steps:
+
+1. Direct UART flash the V16 build (or OTA it with
+   `make_stock_stage3_bundle.py --final-hex inkbird_fw/BOOT_IBSTH2P_v16.hex`).
+2. Confirm `IBS-V16` in the Software Revision characteristic.
+3. Confirm temperature/humidity still update every 5 min over BTHome.
+4. Compare sleep current vs V15 (expect the 10 s awake window to shrink to
+   the main MCU's frame period).
+
+Further battery ideas, in descending value (not implemented):
+
+- Drop `rf_tx_power` from `RF_PHY_TX_POWER_MAX` to 0 dBm (runtime-settable
+  via config command; small win, adv is only every 10 s).
+- Test removing the `hal_pwrmgr_lock(MOD_USR0)` full-awake lock held during
+  BLE connections (irrelevant for passive BTHome use, but a stuck/idle
+  connection currently costs ~mA continuously).
+
+## Second-chip findings (vendor OTA analysis)
+
+The stock updater package `inkbird_fw/ibs_thx_b_2p7_48M_phy6222.hex16`
+contains three Intel-hex segments, all in the PHY6222 address space: 36.5 KB
+at flash 0x20000 (XIP window 0x11020000) and two SRAM pieces at 0x1FFF0000 /
+0x1FFF1838. All of it is ARM Thumb code; there is no payload for any other
+architecture and no second-stage protocol for reflashing another chip.
+Strings inside ("history data", "recoder frame", "run/stop recoder",
+"Real time data", "cfg data", DTM RF calibration banners) show the Inkbird
+app-facing feature set (data logger, config, RF cal) lives in the PHY6222.
+
+Conclusion: the vendor BLE upgrade only ever updates the PHY6222. The second
+MCU (sensor + LCD controller, source of the 13-byte 'R'…'E' frames at
+9600 baud) is not field-updatable and runs fixed firmware.
+
 ## Next Work
 
 1. Keep `master` reproducible against the verified V15 runtime.
