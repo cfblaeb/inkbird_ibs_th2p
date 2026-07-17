@@ -174,6 +174,18 @@ Limitations / notes:
 - Latency up to one measurement cycle (~5 min); by design (the zero-battery
   option). A responsive version would need wake-on-UART plus knowing the main
   MCU's transmit cadence.
+- A connection starting mid-hold cancels the hold (GAPROLE_CONNECTED clears
+  `adv_button_press`/`adv_button_hold`). Otherwise the post-disconnect
+  advertisement rebuild would re-emit the button object under a fresh packet
+  id and fire a phantom press in HA. Consequence: a press immediately
+  followed by a connection may not reach HA — re-press after disconnecting.
+- The premise that frame byte [8] still toggles when the main MCU talks to
+  our silent firmware (which never sends the stock 'S'-frame replies) is
+  unverified on hardware: all captures so far show 0x01. First validation
+  step is simply confirming the icon still toggles and the event arrives.
+- While a hold is active, `adv_measure()` returns early, so the measurement
+  schedule (meas_count), battery check, and post-connection interval restore
+  are each delayed by up to the hold (~60 s). Self-heals afterwards.
 - Detection is on net level change, so an even number of presses between two
   grab windows cancels out. Single presses (the intended use) always register.
 - Adds ~200 bytes of code; the button object grows the advert from 21 to 23

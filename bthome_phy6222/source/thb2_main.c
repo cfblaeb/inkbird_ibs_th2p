@@ -240,6 +240,11 @@ static void set_adv_interval(uint16_t advInt)
 // Set while a button press object is being advertised; consumed by
 // adv_set_data() in bthome_beacon.c.
 volatile uint8_t adv_button_press = 0;
+// Remaining broadcasts in the current hold. File scope so a connection can
+// cancel the hold (see GAPROLE_CONNECTED): the disconnect path rebuilds the
+// advertisement with a fresh packet id, and a leftover button object there
+// would make Home Assistant fire a phantom second press.
+static uint8_t adv_button_hold = 0;
 #endif
 
 static void adv_measure(void) {
@@ -250,7 +255,6 @@ static void adv_measure(void) {
 		{
 			extern uint32_t ucap_get_clicks(void);
 			static uint32_t last_clicks = 0;
-			static uint8_t  btn_hold = 0;
 			uint32_t c = ucap_get_clicks();
 			if (c != last_clicks) {
 				// New button press seen during a grab window: bump the
@@ -260,15 +264,15 @@ static void adv_measure(void) {
 				last_clicks = c;
 				measured_data.count++;
 				adv_button_press = 1;
-				btn_hold = BTN_ADV_HOLD;
+				adv_button_hold = BTN_ADV_HOLD;
 				LL_SetAdvData(bthome_data_beacon((void *) gapRole_AdvertData), gapRole_AdvertData);
 				return;
-			} else if (btn_hold) {
+			} else if (adv_button_hold) {
 				// Hold in progress: keep advertising the frozen packet.
 				// Returning early also prevents a coincident measurement
 				// refresh from rebuilding the packet with a new id, which
 				// would make HA fire a second press event.
-				if (--btn_hold == 0) {
+				if (--adv_button_hold == 0) {
 					// Hold expired: drop the button object and resume the
 					// normal measurement packet with a fresh id.
 					adv_button_press = 0;
@@ -1080,6 +1084,11 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 #if DEVICE == DEVICE_IBSTH2P
 			// Prevent sleep during BLE connection — needed for stable conn events
 			hal_pwrmgr_lock(MOD_USR0);
+			// Cancel any in-progress button-press hold. The disconnect path
+			// rebuilds the advertisement with a fresh packet id; a leftover
+			// button object there would fire a phantom press in HA.
+			adv_button_press = 0;
+			adv_button_hold = 0;
 			// Trigger first measurement quickly (10 sec), then every 5 min
 			ucap_start_grab();
 			osal_start_timerEx(simpleBLEPeripheral_TaskID, TIMER_BATT_EVT, 10000);
