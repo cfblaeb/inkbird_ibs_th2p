@@ -77,7 +77,22 @@ uint8_t adv_set_data(void * pd) {
 	p->humidity = measured_data.humi; // x0.01 %
 	p->v_id = BtHomeID_voltage;
 	p->battery_mv = measured_data.battery_mv; // x mV
-	return sizeof(adv_bthome_data1_t);
+	uint8_t len = sizeof(adv_bthome_data1_t);
+#if DEVICE == DEVICE_IBSTH2P
+	// Append a BTHome button object during a press burst so Home Assistant
+	// fires a per-device button trigger. Object id 0x3a > 0x0c (voltage),
+	// so it keeps the required ascending object order. adv_button_press is
+	// held for a few broadcasts with a frozen packet id (see adv_measure),
+	// which HA de-duplicates into a single press event.
+	extern volatile uint8_t adv_button_press;
+	if (adv_button_press) {
+		uint8_t *b = (uint8_t *)pd + len;
+		b[0] = BtHomeID_button; // 0x3a
+		b[1] = 0x01;            // 0x01 = press
+		len += 2;
+	}
+#endif
+	return len;
 }
 
 #else

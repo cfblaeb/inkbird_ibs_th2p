@@ -144,6 +144,53 @@ Conclusion: the vendor BLE upgrade only ever updates the PHY6222. The second
 MCU (sensor + LCD controller, source of the 13-byte 'R'…'E' frames at
 9600 baud) is not field-updatable and runs fixed firmware.
 
+## V17 Button-to-Home-Assistant Candidate (pending hardware validation)
+
+`inkbird_fw/BOOT_IBSTH2P_v17.hex` adds a per-device button event so dozens of
+otherwise-identical units can be told apart: press a device's button and it
+emits a BTHome button-press that Home Assistant surfaces as a device trigger,
+tagged by that unit's MAC / `IBSTH2P-xxxxxx` name.
+
+How it works (zero added battery cost):
+
+- Frame byte [8] is the button-driven BLE state (see protocol section). It is
+  a latched level that flips on each press. `ucap_process_frame()` compares it
+  across grab windows and increments `ucap.btn_clicks` on each change. No new
+  wakeups, no wake-on-UART — detection piggybacks on the existing 5-min grab
+  windows, so a press can take up to ~5 min to appear in HA. This is fine for
+  the label-my-devices use case (press each, they announce over a few minutes).
+- `adv_measure()` (IBSTH2P block) watches `btn_clicks`. On a change it bumps
+  the BTHome packet id once, sets `adv_button_press`, and pushes an
+  advertisement whose payload now carries a button object (id 0x3a, value 0x01
+  = press). It then returns early for `BTN_ADV_HOLD` (6) broadcasts (~60 s),
+  so the controller repeats that exact frozen-packet-id payload undisturbed.
+  HA de-duplicates the repeats by packet id into a single press event. The
+  early return also stops a coincident measurement refresh from rebuilding the
+  packet and causing a double trigger. After the hold, it reverts to the
+  normal temperature/humidity packet.
+
+Limitations / notes:
+
+- Latency up to one measurement cycle (~5 min); by design (the zero-battery
+  option). A responsive version would need wake-on-UART plus knowing the main
+  MCU's transmit cadence.
+- Detection is on net level change, so an even number of presses between two
+  grab windows cancels out. Single presses (the intended use) always register.
+- Adds ~200 bytes of code; the button object grows the advert from 21 to 23
+  bytes (well under the 31-byte legacy limit). No effect on other devices
+  (verified: a TH04 build still compiles; all new code is under
+  `#if DEVICE == DEVICE_IBSTH2P`).
+
+Validation steps:
+
+1. Flash V17 (direct UART, or OTA via
+   `make_stock_stage3_bundle.py --final-hex inkbird_fw/BOOT_IBSTH2P_v17.hex`).
+2. Confirm `IBS-V17` in the Software Revision characteristic.
+3. In HA (BTHome integration), confirm each unit exposes a button entity/
+   trigger; press a button and confirm exactly one press event fires for that
+   device within a measurement cycle.
+4. Confirm temperature/humidity still update normally between presses.
+
 ## Stock inter-chip UART protocol (reverse-engineered)
 
 Decoded by disassembling the plaintext SRAM/XIP segments of
