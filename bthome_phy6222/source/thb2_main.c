@@ -231,11 +231,54 @@ static void set_adv_interval(uint16_t advInt)
 
 //extern void start_measure(void);
 
+#if DEVICE == DEVICE_IBSTH2P
+// Number of advertising broadcasts to keep the button object present after a
+// press. At the 10 s IBSTH2P advertising interval this is ~60 s, long enough
+// for a Home Assistant BLE scanner to catch it. The controller repeats the
+// same (frozen packet id) payload across the hold, so HA fires exactly once.
+#define BTN_ADV_HOLD	6
+// Set while a button press object is being advertised; consumed by
+// adv_set_data() in bthome_beacon.c.
+volatile uint8_t adv_button_press = 0;
+#endif
 
 static void adv_measure(void) {
 
 	if(gapRole_AdvEnabled) {
 		get_utc_time_sec(); // счет UTC timestamp
+#if DEVICE == DEVICE_IBSTH2P
+		{
+			extern uint32_t ucap_get_clicks(void);
+			static uint32_t last_clicks = 0;
+			static uint8_t  btn_hold = 0;
+			uint32_t c = ucap_get_clicks();
+			if (c != last_clicks) {
+				// New button press seen during a grab window: bump the
+				// BTHome packet id once, add the button object, and push
+				// it immediately. Return so the controller repeats this
+				// exact (frozen id) payload undisturbed for the hold.
+				last_clicks = c;
+				measured_data.count++;
+				adv_button_press = 1;
+				btn_hold = BTN_ADV_HOLD;
+				LL_SetAdvData(bthome_data_beacon((void *) gapRole_AdvertData), gapRole_AdvertData);
+				return;
+			} else if (btn_hold) {
+				// Hold in progress: keep advertising the frozen packet.
+				// Returning early also prevents a coincident measurement
+				// refresh from rebuilding the packet with a new id, which
+				// would make HA fire a second press event.
+				if (--btn_hold == 0) {
+					// Hold expired: drop the button object and resume the
+					// normal measurement packet with a fresh id.
+					adv_button_press = 0;
+					measured_data.count++;
+					LL_SetAdvData(bthome_data_beacon((void *) gapRole_AdvertData), gapRole_AdvertData);
+				}
+				return;
+			}
+		}
+#endif
 #if	(DEV_SERVICES & SERVICE_RDS)
 		if(!adv_wrk.adv_event) {
 			if(clkt.utc_time_tik - adv_wrk.rds_timer_tik >= (RDS_EVENT_STEP_SEC << 15)) { //  шаг дублирования передачи 30 минут

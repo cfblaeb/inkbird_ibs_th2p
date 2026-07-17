@@ -106,6 +106,16 @@ typedef struct {
 	// chip sleeps for the rest of the window instead of idling awake.
 	volatile uint8_t  grab_active;
 	uint8_t uart_inited;
+
+	// Device-button tracking. Frame byte [8] is the button-driven BLE
+	// enable state on the stock firmware (see protocol notes above); it
+	// toggles on each physical button press. We only observe the latched
+	// level during grab windows, so we count net changes: a single press
+	// between windows registers as one click. btn_known suppresses a
+	// phantom click on the very first frame after boot.
+	volatile uint8_t  btn_known;
+	volatile uint8_t  btn_last;      // last observed byte [8] level
+	volatile uint32_t btn_clicks;    // monotonic count of detected changes
 } uart_capture_t;
 
 uart_capture_t ucap;
@@ -136,6 +146,15 @@ static void ucap_process_frame(void) {
 	ucap.last_byte9 = f[9];
 	ucap.last_flags7 = f[7];
 	ucap.last_flags8 = f[8];
+
+	// Detect device-button activity from the latched byte [8] level.
+	if (!ucap.btn_known) {
+		ucap.btn_known = 1;
+		ucap.btn_last = f[8];
+	} else if (f[8] != ucap.btn_last) {
+		ucap.btn_last = f[8];
+		ucap.btn_clicks++;
+	}
 
 	// Got a fresh frame: release the UART power lock now so the chip can
 	// sleep for the remainder of the grab window. read_sensors() will
@@ -207,6 +226,13 @@ int ucap_init(void) {
 	}
 
 	return ret;
+}
+
+// Monotonic count of detected device-button changes. The advertising loop
+// compares this against its own last-seen value to fire a BTHome button
+// press event; see adv_measure() in thb2_main.c.
+uint32_t ucap_get_clicks(void) {
+	return ucap.btn_clicks;
 }
 
 // Re-init UART hardware and lock to prevent sleep during grab window.
