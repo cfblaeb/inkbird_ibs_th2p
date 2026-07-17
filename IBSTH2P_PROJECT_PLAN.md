@@ -144,6 +144,54 @@ Conclusion: the vendor BLE upgrade only ever updates the PHY6222. The second
 MCU (sensor + LCD controller, source of the 13-byte 'R'…'E' frames at
 9600 baud) is not field-updatable and runs fixed firmware.
 
+## Stock inter-chip UART protocol (reverse-engineered)
+
+Decoded by disassembling the plaintext SRAM/XIP segments of
+`inkbird_fw/ibs_thx_b_2p7_48M_phy6222.hex16` (stock UART0 ISR located via the
+SDK jump table entry `V11_IRQ_HANDLER` at 0x1FFF3A15; frame parser at
+0x1FFF2A48; app task ProcessEvent at 0x1FFF5F81).
+
+Main MCU -> PHY frames: `'R' + 11 payload bytes + 'E'` at 9600 baud.
+Payload (0-indexed relative to the 11-byte payload):
+
+- `[6]` frame type. Type 1 = periodic measurement with temperature at
+  `[2..3]` (LE s16, x0.01 C) and humidity at `[4..5]` (LE s16, x0.01 %).
+  Types 0/2/3 are variants carrying temperature in `[0..1]`; a non-type-1
+  frame triggers a small reply frame from the PHY.
+- `[7]` **BLE enable state driven by the device button**: 1 = on, 0 = off.
+  The button is wired to the main MCU only. On every valid frame the stock
+  firmware fires OSAL event 0x100 and applies this byte to
+  `GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED /* 0x305 */, 1, &flag)`;
+  when it transitions to 0 with a live connection, the connection is
+  terminated first. There is no dedicated button GPIO to the PHY — the
+  state rides in-band in the measurement stream.
+- `[8]` battery percent computed by the main MCU (observed 0x50-0x55 =
+  80-85%). The stock firmware copies it into the BLE scan-response data it
+  refreshes on a 5-second timer.
+- `[9..10]` CRC-16/MODBUS (reflected poly 0xA001, init 0xFFFF) over payload
+  bytes `[0..8]`, stored little-endian.
+
+PHY -> main MCU frames: `'S' + 9 payload bytes + 'E'`, same CRC over the
+first 7 payload bytes at `[7..8]`. Before transmitting, the stock firmware
+raises a GPIO (pin id 4) for ~300 us as a wake signal to the main MCU, and
+drops it ~200 us after the frame.
+
+Other stock details recovered along the way: the stock app advertises as
+`sps` (an alternate `tps` name exists for a second mode/model), refreshes
+scan-response data with live sensor values every 5 s (that is how the
+Inkbird app reads without connecting), and stores history in an external
+I2C EEPROM bit-banged on pins 17/19 with pin 16 as write-protect.
+
+Implications for the custom firmware (not yet implemented):
+
+1. Watching payload `[7]` in `ucap_process_frame()` would make the device
+   button work: advertising on/off in sync with the LCD icon the main MCU
+   already draws.
+2. Payload `[8]` provides the main MCU's own battery estimate as a
+   cross-check for the PHY's ADC measurement.
+3. Frames can be validated with the now-known CRC instead of only the
+   start/end markers.
+
 ## Next Work
 
 1. Keep `master` reproducible against the verified V15 runtime.

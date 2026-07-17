@@ -50,15 +50,27 @@ extern gapPeriConnectParams_t periConnParameters;
 // The main MCU sends 13-byte frames on UART0 (TX=P09, RX=P10, 9600 baud):
 //   'R' + 11 data bytes + 'E'
 //
-// Frame layout (0-indexed within the 13-byte frame):
+// Frame layout (0-indexed within the 13-byte frame), semantics confirmed by
+// disassembling the stock PHY6222 firmware's parser (see "Stock inter-chip
+// UART protocol" in IBSTH2P_PROJECT_PLAN.md):
 //   [0]    = 0x52 'R' start marker
-//   [1-2]  = unknown (counter/status, varies)
-//   [3-4]  = temperature (LE int16, x0.01 °C)
+//   [1-2]  = type-dependent payload (temperature for frame types 0/2/3)
+//   [3-4]  = temperature (LE int16, x0.01 °C) for frame type 1
 //   [5-6]  = humidity (LE int16, x0.01 %)
-//   [7-8]  = flags (both 0x01 observed)
-//   [9]    = unknown (varies slowly, ~0x50-0x55)
-//   [10-11]= checksum (likely CRC-16)
+//   [7]    = frame type: 1 = periodic measurement (the normal stream);
+//            0/2/3 = variants with temperature in bytes [1-2]
+//   [8]    = BLE enable state from the device button: 1 = on, 0 = off.
+//            Stock firmware applies this to GAPROLE_ADVERT_ENABLED on every
+//            valid frame (and drops a live connection when it goes to 0).
+//   [9]    = battery percent computed by the main MCU (0x50-0x55 = 80-85%)
+//   [10-11]= CRC-16/MODBUS (poly 0xA001 reflected, init 0xFFFF) over
+//            bytes [1..9], stored little-endian
 //   [12]   = 0x45 'E' end marker
+//
+// Reverse channel (stock firmware only, not used here): PHY -> main MCU
+// frames are 'S' + 9 bytes + 'E' with the same CRC over the first 7 payload
+// bytes; the stock firmware raises a GPIO for ~300 us before transmitting
+// to wake the main MCU's UART receiver.
 
 #define FRAME_START 0x52  // 'R'
 #define FRAME_END   0x45  // 'E'
