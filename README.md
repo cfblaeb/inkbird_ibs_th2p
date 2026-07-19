@@ -1,106 +1,61 @@
 # Inkbird IBS-TH2 Plus Custom Firmware
 
-This repository is currently centered on the Inkbird IBS-TH2 Plus PHY6222 BLE
-firmware and the migration path from stock firmware to the custom V15 runtime.
+Custom BLE firmware for the Inkbird IBS-TH2 Plus (PHY6222): reads
+temperature/humidity from the main MCU's inter-chip UART stream and
+broadcasts it as unencrypted BTHome v2, with per-device button-press events
+for Home Assistant. Based on [pvvx/THB2](https://github.com/pvvx/THB2).
 
 ## Current Status
 
-As of 2026-05-25, the end-to-end migration path is working.
+Current runtime: **V19** (hardware-validated). Highlights by version:
 
-- Direct UART flash of the clean V15 runtime succeeds and BLE comes up.
-- Restoring stock from `bthome_phy6222/orig/orig.bin` succeeds.
-- Stock BLE OTA of `inkbird_fw/STAGE3_IBSTH2P_stock_bundle_installer.hex16`
-  through `inkbird_fw/InkbirdOTA.html` succeeds.
-- After OTA install, the device reboots into the custom firmware and advertises
-  as `IBSTH2P-973B39`, with temperature and humidity visible in nRF Connect.
+- **V15** — first complete stock-OTA migration path (baseline, in git history)
+- **V16** — UART sleep-lock released on first good frame (battery fix)
+- **V17** — physical button presses become BTHome button events (identify a
+  unit in Home Assistant by pressing it)
+- **V18** — 60 s fast-advertising window after any reset: pull the battery
+  and the device is connectable from anything (incl. Linux/desktop Chrome)
+  for a minute, at zero steady-state battery cost
+- **V19** — UART framing hardened: CRC-16/MODBUS validation and proper
+  resync (fixes a latent bug where payload bytes equal to `'R'` — e.g. the
+  main-MCU battery byte at 82% — broke every frame)
 
-The practical migration architecture is now proven:
+See [IBSTH2P_PROJECT_PLAN.md](IBSTH2P_PROJECT_PLAN.md) for the full
+engineering log: architecture, per-version notes, reverse-engineered
+inter-chip UART protocol, reproducible-build toolchain recipe, and current
+flashing paths.
 
-1. Stock Inkbird BLE OTA transports the bundle.
-2. A tiny SRAM installer runs from staged SRAM.
-3. The installer copies the verified V15 image into low flash and resets.
-4. The final custom runtime boots normally and advertises over BLE.
+## Flashing
 
-## Key Files
+**Update a device already on custom firmware (V18+):** pull the battery,
+open `inkbird_fw/InkbirdOTA.html` in Chrome, load
+`inkbird_fw/BOOT_IBSTH2P_v19_ota.bin`, Connect & Flash within ~60 s.
 
-- `inkbird_fw/BOOT_IBSTH2P_v15.hex`: hardware-validated final low-flash image
-  layout.
-- `inkbird_fw/BOOT_IBSTH2P_v15_fullflash.bin`: UART-flashable full image for
-  direct recovery and validation.
-- `inkbird_fw/STAGE3_IBSTH2P_stock_bundle_installer.hex16`: stock OTA bundle
-  containing the mini installer and staged final payload.
-- `inkbird_fw/InkbirdOTA.html`: Web Bluetooth page for flashing the stock OTA
-  bundle onto stock firmware.
-- `flash_pogo.py`: UART flashing utility used for fullflash restore and direct
-  runtime flashing.
-- `bthome_phy6222/orig/orig.bin`: preserved stock fullflash dump.
+**Convert a stock device:** same page, load
+`inkbird_fw/STAGE3_IBSTH2P_v19_stock_bundle_installer.hex16`, connect to
+the stock `sps` device and follow the PPlusOTA prompt.
 
-## Proven Workflows
+The page auto-detects which kind of device you connected to and refuses a
+mismatched file. Interrupted transfers on the custom path are safe — the
+image only activates after an on-device CRC32 check.
 
-### Restore stock fullflash
+**Scripted/recovery paths:** `ble_phy_ota_flash.py` (BLE, scripted),
+`flash_pogo.py` + `rdwr_phy62x2.py` (direct UART via pogo pins),
+`bthome_phy6222/orig/orig.bin` (stock fullflash restore).
+`ble_le_conn_ext.py` opens a BLE connection to pre-V18 firmware from Linux
+(the kernel's ~4 s LE connect window cannot reach a 10 s advertiser).
 
-```bash
-sudo python3 flash_pogo.py -p /dev/ttyUSB0 -e -r wf 0x0 bthome_phy6222/orig/orig.bin
-```
+## Monitoring
 
-### Direct-flash the verified V15 runtime
+`python3 bthome_monitor.py` — curses TUI: one live row per BTHome device
+(RSSI, measurements, time since last new data / last re-broadcast / last
+button press).
 
-```bash
-sudo python3 flash_pogo.py -p /dev/ttyUSB0 -e -r wf 0x0 inkbird_fw/BOOT_IBSTH2P_v15_fullflash.bin
-```
+## Building
 
-### Rebuild the clean V15 runtime from sources
-
-Use an isolated object directory. Do not rely on the shared
-`bthome_phy6222/build` tree.
-
-```bash
-make -B -C bthome_phy6222 \
-  OBJ_DIR=build_boot_ibsth2p_stage3_clean \
-  PROJECT_NAME=BOOT_IBSTH2P \
-  PROJECT_DEF="-DDEVICE=DEVICE_IBSTH2P" \
-  BOOT_OTA=1
-```
-
-The resulting `bthome_phy6222/build_boot_ibsth2p_stage3_clean/BOOT_IBSTH2P.hex`
-matches `inkbird_fw/BOOT_IBSTH2P_v15.hex` byte-for-byte.
-
-### Build the BLE OTA mini-installer bundle
-
-```bash
-make -C inkbird_fw/stock_bundle_installer
-python3 inkbird_fw/make_stock_stage3_bundle.py
-```
-
-By default, `inkbird_fw/make_stock_stage3_bundle.py` now uses the
-hardware-validated `inkbird_fw/BOOT_IBSTH2P_v15.hex` as the final payload.
-
-If you want to test a fresh source build instead, override it explicitly:
-
-```bash
-python3 inkbird_fw/make_stock_stage3_bundle.py \
-  --final-hex bthome_phy6222/build_boot_ibsth2p_stage3_clean/BOOT_IBSTH2P.hex
-```
-
-### Flash the stock OTA bundle over BLE
-
-1. Restore stock first if needed.
-2. Open `inkbird_fw/InkbirdOTA.html` in a browser that supports Web Bluetooth.
-3. Load `inkbird_fw/STAGE3_IBSTH2P_stock_bundle_installer.hex16`.
-4. Connect to `sps`, allow the mode switch, then reconnect to `PPlusOTA`.
-5. Wait for all partitions to complete and the device to reboot.
-
-On the successful 2026-05-25 test, the stock OTA bundle loaded 9 partitions,
-the device rebooted, and the final custom runtime came up over BLE with live
-temperature and humidity.
-
-## Current Repo Intent
-
-The repository now has a proven baseline:
-
-- `master`: clean V15 plus the working stock-OTA mini-installer path.
-- `ibsth2p-v15-good`: exact clean V15 baseline.
-- `ibsth2p-current-experimental`: preserved historical experimental branch.
-
-Future changes should be brought back onto `master` incrementally and validated
-against the verified V15 runtime and the working stock OTA installer path.
+The firmware source lives in `bthome_phy6222/` (pvvx THB2 tree; build with
+`DEVICE=DEVICE_IBSTH2P BOOT_OTA=1`). Release builds use a pinned Debian
+gcc-arm-none-eabi 14.2.rel1 toolchain — see the recipe in the project plan;
+Ubuntu's packaged 13.2 cross-compiler produces different (unverified)
+codegen. Host unit tests for the UART framing:
+`cd bthome_phy6222/tests && gcc -o t test_ucap_frame.c && ./t`.
