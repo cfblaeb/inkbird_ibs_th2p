@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""Monitor unencrypted BTHome v2 broadcasts from an Inkbird IBS-TH2P.
+"""BTHome TUI monitor — one live-updating row per detected device.
 
 Usage:
-    python3 bthome_monitor.py                 # match by name (default below)
-    python3 bthome_monitor.py IBSTH2P-CF776F  # match by name substring
-    python3 bthome_monitor.py AA:BB:CC:...    # match by MAC address
+    python3 bthome_monitor.py                  # all BTHome devices
+    python3 bthome_monitor.py IBSTH2P          # only names containing this
+    python3 bthome_monitor.py AA:BB:CC:DD:EE:FF  # only this address
+
+Keys: q quits.
+
+Columns:
+    NEW    time since the payload last changed (fresh measurement/event)
+    REP    time since the last identical re-broadcast was received
+    (xN)   how many times the current payload has been received
+    BUTTON time since the last button-press event (BTHome object 0x3A)
 """
-import sys
-import struct
 import asyncio
-from datetime import datetime
+import curses
+import sys
+import time
+
 from bleak import BleakScanner
 
 BTHOME_UUID = "0000fcd2-0000-1000-8000-00805f9b34fb"
-DEFAULT_MATCH = "IBSTH2P"
 
 # object_id -> (name, byte length, signed?, scale factor)
 OBJECTS = {
@@ -48,60 +56,167 @@ def decode_bthome(data: bytes) -> dict:
     return out
 
 
-# De-duplication state: only payload changes start a new line; identical
-# re-transmissions bump a counter updated in place on the current line.
-_last_key = None
-_line = ""
-_repeats = 0
+def fmt_age(t_event, now):
+    """Compact age like 8s / 4m32s / 1h05m / 2d03h; '-' if never."""
+    if t_event is None:
+        return "-"
+    s = int(now - t_event)
+    if s < 0:
+        s = 0
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    if s < 86400:
+        return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+    return f"{s // 86400}d{(s % 86400) // 3600:02d}h"
 
 
-def callback(device, adv):
-    global _last_key, _line, _repeats
-    sd = adv.service_data.get(BTHOME_UUID)
-    if not sd:
-        return
-    key = (device.address, bytes(sd))
-    if key == _last_key:
-        _repeats += 1
-        print(f"\r{_line}  (x{_repeats})", end="", flush=True)
-        return
-    if _last_key is not None:
-        print()  # finalize the previous line
-    values = decode_bthome(sd)
-    fields = "  ".join(f"{k}={v}" for k, v in values.items())
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    _last_key = key
-    _repeats = 1
-    _line = f"{ts}  {device.address}  RSSI={adv.rssi:>4}  {fields}"
-    print(_line, end="", flush=True)
+class DevState:
+    __slots__ = ("addr", "name", "rssi", "payload", "values",
+                 "last_new", "last_repeat", "repeats", "last_button")
+
+    def __init__(self, addr):
+        self.addr = addr
+        self.name = ""
+        self.rssi = 0
+        self.payload = None
+        self.values = {}
+        self.last_new = None
+        self.last_repeat = None
+        self.repeats = 0
+        self.last_button = None
 
 
-async def main():
-    match = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MATCH
-    is_mac = ":" in match
-    match_l = match.lower()
+devices = {}   # addr -> DevState
+dev_order = []  # first-seen ordering
 
-    def detection(device, adv):
-        name = (adv.local_name or device.name or "")
-        if is_mac:
-            if device.address.lower() != match_l:
-                return
-        elif match_l not in name.lower():
+
+def make_callback(flt):
+    flt_l = flt.lower() if flt else None
+
+    def cb(device, adv):
+        sd = adv.service_data.get(BTHOME_UUID)
+        if not sd:
             return
-        callback(device, adv)
+        name = adv.local_name or device.name or ""
+        if flt_l and flt_l not in name.lower() and flt_l != device.address.lower():
+            return
+        now = time.monotonic()
+        d = devices.get(device.address)
+        if d is None:
+            d = devices[device.address] = DevState(device.address)
+            dev_order.append(device.address)
+        d.rssi = adv.rssi
+        if name:
+            d.name = name
+        payload = bytes(sd)
+        if payload == d.payload:
+            d.repeats += 1
+            d.last_repeat = now
+        else:
+            d.payload = payload
+            d.values = decode_bthome(payload)
+            d.last_new = now
+            d.repeats = 1
+            if "button_event" in d.values:
+                d.last_button = now
 
-    print(f"Scanning for '{match}'  (Ctrl-C to stop)...")
-    scanner = BleakScanner(detection_callback=detection)
+    return cb
+
+
+HEADER = (f"{'ADDRESS':<18}{'NAME':<16}{'RSSI':>5} {'PID':>4} {'TEMP°C':>7} "
+          f"{'HUM%':>6} {'BATT':>5} {'VOLT':>6} {'NEW':>7} {'REP':>7} "
+          f"{'(xN)':>6} {'BUTTON':>8}")
+
+
+def draw(stdscr):
+    now = time.monotonic()
+    h, w = stdscr.getmaxyx()
+    stdscr.erase()
+    clock = time.strftime("%H:%M:%S")
+    title = f" BTHome monitor — {len(devices)} device(s) — q to quit"
+    stdscr.addnstr(0, 0, title.ljust(w - len(clock) - 1) + clock, w - 1,
+                   curses.A_BOLD)
+    stdscr.addnstr(1, 0, HEADER, w - 1, curses.A_UNDERLINE)
+    row = 2
+    for addr in dev_order:
+        if row >= h:
+            break
+        d = devices[addr]
+        v = d.values
+        pid = v.get("packet_id", "-")
+        temp = v.get("temperature_C")
+        humi = v.get("humidity_%")
+        batt = v.get("battery_%")
+        volt = v.get("voltage_V")
+        line = (f"{d.addr:<18}{d.name[:15]:<16}{d.rssi:>5} {pid!s:>4} "
+                f"{f'{temp:.2f}' if temp is not None else '-':>7} "
+                f"{f'{humi:.2f}' if humi is not None else '-':>6} "
+                f"{str(batt) + '%' if batt is not None else '-':>5} "
+                f"{f'{volt:.3f}' if volt is not None else '-':>6} "
+                f"{fmt_age(d.last_new, now):>7} "
+                f"{fmt_age(d.last_repeat, now):>7} "
+                f"{'(x' + str(d.repeats) + ')':>6} ")
+        attr = curses.A_NORMAL
+        if d.last_new is not None and now - d.last_new < 3:
+            attr |= curses.A_BOLD | curses.color_pair(1)   # fresh data
+        stdscr.addnstr(row, 0, line, w - 1, attr)
+        # button column: timestamp is latched at each press and keeps
+        # counting up after the 0x3A object leaves the advertisement;
+        # highlighted while recent, dim only if never pressed.
+        btn = f"{fmt_age(d.last_button, now):>8}"
+        if d.last_button is None:
+            battr = curses.A_DIM
+        elif now - d.last_button < 120:
+            battr = curses.color_pair(2) | curses.A_BOLD
+        else:
+            battr = curses.A_NORMAL
+        if len(line) < w - 1:
+            stdscr.addnstr(row, len(line), btn, w - 1 - len(line), battr)
+        row += 1
+    if not devices:
+        stdscr.addnstr(3, 2, "scanning...", w - 3, curses.A_DIM)
+    stdscr.refresh()
+
+
+async def run(stdscr, flt):
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_GREEN, -1)
+    curses.init_pair(2, curses.COLOR_YELLOW, -1)
+
+    scanner = BleakScanner(detection_callback=make_callback(flt))
     await scanner.start()
     try:
         while True:
-            await asyncio.sleep(1)
+            draw(stdscr)
+            if stdscr.getch() in (ord("q"), ord("Q")):
+                break
+            await asyncio.sleep(0.25)
     finally:
         await scanner.stop()
 
 
+def main():
+    flt = sys.argv[1] if len(sys.argv) > 1 else None
+    stdscr = curses.initscr()
+    try:
+        curses.noecho()
+        curses.cbreak()
+        stdscr.keypad(True)
+        asyncio.run(run(stdscr, flt))
+    finally:
+        stdscr.keypad(False)
+        curses.nocbreak()
+        curses.echo()
+        curses.endwin()
+
+
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
-        print()  # finalize the in-place line before exiting
+        pass
