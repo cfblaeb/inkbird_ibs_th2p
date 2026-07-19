@@ -40,11 +40,17 @@ final low-flash image all work together on real hardware.
 
 ## Known-Good Artifacts
 
-- `inkbird_fw/BOOT_IBSTH2P_v15.hex`
-- `inkbird_fw/BOOT_IBSTH2P_v15_fullflash.bin`
-- `inkbird_fw/BOOT_IBSTH2P_v15_ota.bin`
-- `inkbird_fw/STAGE3_IBSTH2P_stock_bundle_installer.hex16`
-- `inkbird_fw/STAGE3_IBSTH2P_stock_bundle_payload.bin`
+Only the current version is kept in the working tree; every older image
+(V12–V18 experiments, fullflash captures, the V15 baseline set) remains
+available in git history.
+
+- `inkbird_fw/BOOT_IBSTH2P_v19.hex` — current hardware-validated runtime
+- `inkbird_fw/BOOT_IBSTH2P_v19_ota.bin` — pvvx-path OTA image
+- `inkbird_fw/STAGE3_IBSTH2P_v19_stock_bundle_installer.hex16` (+ payload) —
+  stock-path bundle
+- `inkbird_fw/ibs_thx_b_2p7_48M_phy6222.hex16` — stock updater image
+  (input for the bundle generator; keep)
+- `bthome_phy6222/orig/orig.bin` — stock fullflash backup (UART recovery)
 - `inkbird_fw/InkbirdOTA.html`
 - `flash_pogo.py`
 
@@ -57,22 +63,18 @@ final low-flash image all work together on real hardware.
 3. The SRAM installer validates the `IBI3` payload, erases the low-flash target
    sectors, writes the final records, verifies them in place, clears OTA mode,
    and resets.
-4. The final low-flash runtime is the verified V15 image.
+4. The final low-flash runtime is the current verified image (V19).
 
 ## Reproducible Build Paths
 
 ### Final low-flash runtime
 
-```bash
-make -B -C bthome_phy6222 \
-  OBJ_DIR=build_boot_ibsth2p_stage3_clean \
-  PROJECT_NAME=BOOT_IBSTH2P \
-  PROJECT_DEF="-DDEVICE=DEVICE_IBSTH2P" \
-  BOOT_OTA=1
-```
-
-Expected result: `bthome_phy6222/build_boot_ibsth2p_stage3_clean/BOOT_IBSTH2P.hex`
-matches `inkbird_fw/BOOT_IBSTH2P_v15.hex` exactly.
+Build with the pinned toolchain — see "Reproducible builds on Ubuntu 24.04
+(toolchain recipe)" below. Expected result: the produced
+`BOOT_IBSTH2P.hex` is functionally identical to
+`inkbird_fw/BOOT_IBSTH2P_v19.hex` (byte-identical except for linker
+veneer ordering; verify with the veneer-aware comparison described in the
+toolchain section).
 
 ### Mini installer and stock OTA bundle
 
@@ -81,13 +83,16 @@ make -C inkbird_fw/stock_bundle_installer
 python3 inkbird_fw/make_stock_stage3_bundle.py
 ```
 
-The bundle generator now defaults to the verified
-`inkbird_fw/BOOT_IBSTH2P_v15.hex` payload. Use `--final-hex` only when testing a
-fresh source build intentionally.
+The bundle generator defaults to the current verified
+`inkbird_fw/BOOT_IBSTH2P_v19.hex` payload (regenerating with defaults
+reproduces the committed V19 bundle byte-for-byte). Use `--final-hex` only
+when testing a fresh source build intentionally.
 
 ## Branch Layout
 
-- `master`: clean V15 baseline plus the working stock-OTA mini-installer path.
+- `master`: current validated runtime (V19) plus all tooling. Older
+  baselines (the V15 known-good set, experimental images) live in git
+  history rather than the working tree.
 - `ibsth2p-v15-good`: exact clean V15 baseline.
 - `ibsth2p-current-experimental`: preserved pre-cleanup experimental work.
 

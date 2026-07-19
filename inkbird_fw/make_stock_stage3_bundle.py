@@ -41,9 +41,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 DEFAULT_STOCK_HEX = HERE / "ibs_thx_b_2p7_48M_phy6222.hex16"
 DEFAULT_INSTALLER_HEX = HERE / "build" / "stock_bundle_installer" / "STOCK_BUNDLE_INSTALLER.hex"
-# Default to the hardware-verified V15 image. Callers can still override this
+# Default to the current hardware-validated image. Callers can still override this
 # with --final-hex when testing a fresh source build.
-DEFAULT_FINAL_HEX = HERE / "BOOT_IBSTH2P_v15.hex"
+DEFAULT_FINAL_HEX = HERE / "BOOT_IBSTH2P_v19.hex"
 DEFAULT_OUTPUT_HEX = HERE / "STAGE3_IBSTH2P_stock_bundle_installer.hex16"
 DEFAULT_PAYLOAD_BIN = HERE / "STAGE3_IBSTH2P_stock_bundle_payload.bin"
 
@@ -299,7 +299,7 @@ def main() -> int:
         "--final-hex",
         type=Path,
         default=DEFAULT_FINAL_HEX,
-        help="final low-flash image to install (default: hardware-verified V15 hex)",
+        help="final low-flash image to install (default: current hardware-validated hex)",
     )
     parser.add_argument("--output-hex", type=Path, default=DEFAULT_OUTPUT_HEX)
     parser.add_argument("--payload-bin", type=Path, default=DEFAULT_PAYLOAD_BIN)
