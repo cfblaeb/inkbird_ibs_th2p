@@ -660,7 +660,21 @@ void SimpleBLEPeripheral_Init( uint8_t task_id )
 		set_adv_interval(DEF_CON_ADV_INTERVAL); // actual time = advInt * 625us
 	} else
 #endif
+#if DEVICE == DEVICE_IBSTH2P
+	{
+		// Fast-connect window on any power-on/reset: advertise at
+		// DEF_CON_ADV_INTERVAL (~1.56 s) for ~60 s so hosts with a short
+		// LE create-connection timeout (Linux caps it at ~4 s, below the
+		// 10 s steady-state interval) can connect, e.g. for OTA updates:
+		// pull the battery, then connect within a minute. adv_measure()
+		// restores cfg.advertising_interval when adv_reload_count expires,
+		// so the steady-state battery cost is zero.
+		adv_wrk.adv_reload_count = 60000 / DEF_CON_ADV_INTERVAL_MS; // 60 sec
+		set_adv_interval(DEF_CON_ADV_INTERVAL); // actual time = advInt * 625us
+	}
+#else
 	set_adv_interval(cfg.advertising_interval * 100); // actual time = advInt * 625us
+#endif
 
 	HCI_PPLUS_AdvEventDoneNoticeCmd(simpleBLEPeripheral_TaskID, ADV_BROADCAST_EVT);
 #if (DEF_GAPBOND_MGR_ENABLE==1)
