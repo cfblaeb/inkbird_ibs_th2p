@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Inkbird IBS-TH2 Plus — SHB OTA Flasher</title>
+<title>Inkbird IBS-TH2 Plus — OTA Flasher</title>
 <style>
 body { font-family: Arial, sans-serif; max-width: 700px; margin: 20px auto; padding: 0 16px; color: #1a1a2e; background: #f8f9fa; }
 h1 { text-align: center; font-size: 22px; margin-bottom: 4px; }
@@ -31,13 +31,17 @@ td:first-child { color: #666; width: 120px; }
 </head>
 <body>
 <h1>Inkbird IBS-TH2 Plus OTA</h1>
-<div class="subtitle">SHB OTA Flasher via Web Bluetooth</div>
+<div class="subtitle">Dual-mode OTA flasher via Web Bluetooth — stock SHB (<code>sps</code>/<code>PPlusOTA</code>) and custom BTHome (<code>IBSTH2P-*</code>). The flash protocol is picked automatically from the device you select.</div>
 <div id="versionTag" class="version"></div>
 
 <div class="section">
   <h2>1. Load Firmware</h2>
-  <input type="file" id="fileInput" accept=".hex,.hex16">
+  <input type="file" id="fileInput" accept=".hex,.hex16,.bin">
   <div id="fileInfo" class="info"></div>
+  <div class="info">
+    Stock device (<code>sps</code>): load <code>STAGE3_*_stock_bundle_installer.hex16</code>.
+    Custom BTHome device (<code>IBSTH2P-*</code>): load <code>BOOT_IBSTH2P_v??_ota.bin</code>.
+  </div>
 </div>
 
 <div class="section">
@@ -61,7 +65,7 @@ td:first-child { color: #666; width: 120px; }
 <script>
 "use strict";
 
-const JS_VERSION = "2026-04-11a";
+const JS_VERSION = "2026-07-19a";
 
 // ── BLE UUIDs ──
 const SHB_SERVICE   = "5833ff01-9b8b-5191-6142-22a4536ef123";
@@ -69,13 +73,23 @@ const SHB_CMD_CHAR  = "5833ff02-9b8b-5191-6142-22a4536ef123";
 const SHB_NTF_CHAR  = "5833ff03-9b8b-5191-6142-22a4536ef123";
 const SHB_DATA_CHAR = "5833ff04-9b8b-5191-6142-22a4536ef123";
 
+// pvvx BTHome firmware (bthome_phy6222): main service 0xFCD2, OTA char 0xFFF3.
+// Protocol reference: bthome_phy6222/source/ble_ota.c + web/PHY62x2BTHome.html.
+const PHY_SERVICE  = "0000fcd2-0000-1000-8000-00805f9b34fb";
+const PHY_OTA_CHAR = "0000fff3-0000-1000-8000-00805f9b34fb";
+const PHY6_MAGIC = 0x36594850; // "PHY6" little-endian
+const PHY_OTA_MAX_SIZE = 0x30000;
+
 // ── State ──
 let gattServer = null;
 let cmdChar = null;
 let ntfChar = null;
 let dataChar = null;
 let aborted = false;
-let firmwarePartitions = null; // [{address: number, data: Uint8Array}, ...]
+let loadedKind = null;         // "hex" (stock SHB path) | "phy6" (pvvx BTHome path)
+let firmwarePartitions = null; // hex: [{address: number, data: Uint8Array}, ...]
+let pvvxImage = null;          // phy6: Uint8Array (PHY6 OTA container, 16-byte padded)
+let pvvxBlockCount = 0;
 let totalBytes = 0;
 let sentBytes = 0;
 let pendingReconnect = null; // resolve function for reconnect button
@@ -171,7 +185,7 @@ function parseIntelHex(text) {
   return partitions;
 }
 
-// ── CRC-16 (polynomial 0xA001, init 0) ──
+// ── CRC-16 (polynomial 0xA001, init 0) — stock SHB protocol ──
 function crc16(data) {
   let crc = 0;
   for (let i = 0; i < data.length; i++) {
@@ -183,6 +197,34 @@ function crc16(data) {
   }
   return crc & 0xFFFF;
 }
+
+// ── CRC-16 (polynomial 0xA001, init 0xFFFF) — pvvx OTA packets (ble_ota.c crc16) ──
+function crc16m(data, len) {
+  let crc = 0xFFFF;
+  for (let i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (let j = 0; j < 8; j++) {
+      if (crc & 1) crc = (crc >>> 1) ^ 0xA001;
+      else crc = crc >>> 1;
+    }
+  }
+  return crc & 0xFFFF;
+}
+
+// ── CRC-32 without final inversion — matches phy62x2_ota.py (0xFFFFFFFF - zlib.crc32) ──
+const crc32raw = (function() {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) c = (c & 1) ? (c >>> 1) ^ 0xEDB88320 : c >>> 1;
+    table[i] = c >>> 0;
+  }
+  return function(data) {
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < data.length; i++) crc = (crc >>> 8) ^ table[(crc ^ data[i]) & 0xFF];
+    return crc >>> 0; // NOT inverted: equals 0xFFFFFFFF - standard crc32
+  };
+})();
 
 // ── Hex formatting helpers ──
 function hex(val, bytes) {
@@ -276,8 +318,10 @@ function analyzeFirmwareForStockOta(partitions) {
 }
 
 function ensureFirmwareEligibleForStockOta() {
-  if (!firmwarePartitions || firmwarePartitions.length === 0) {
-    log("ERROR: Load a firmware file first");
+  if (loadedKind !== "hex" || !firmwarePartitions || firmwarePartitions.length === 0) {
+    log("ERROR: The stock OTA path needs a .hex/.hex16 image (e.g. STAGE3_*_stock_bundle_installer.hex16). " +
+        (loadedKind === "phy6" ? "A PHY6 OTA .bin is loaded — that one is for the custom BTHome firmware." : "Load a firmware file first."));
+    setStatus("Wrong file for stock OTA", "error");
     return false;
   }
   if (firmwareIssues.length) {
@@ -290,6 +334,38 @@ function ensureFirmwareEligibleForStockOta() {
   return true;
 }
 
+function ensureFirmwareEligibleForPhyOta() {
+  if (loadedKind !== "phy6" || !pvvxImage) {
+    log("ERROR: The BTHome device flash path needs a PHY6 OTA .bin (e.g. BOOT_IBSTH2P_v16_ota.bin, built by phy62x2_ota.py). " +
+        (loadedKind === "hex" ? "A .hex/.hex16 is loaded — that one is for the stock OTA path." : "Load a firmware file first."));
+    setStatus("Wrong file for BTHome OTA", "error");
+    return false;
+  }
+  return true;
+}
+
+// ── PHY6 OTA container validation (mirrors testFwOTA in web/PHY62x2BTHome.html) ──
+function validatePhy6Image(data) {
+  const fsize = data.length;
+  if (fsize < 20) throw new Error("PHY6 OTA image too small");
+  if (fsize > PHY_OTA_MAX_SIZE) throw new Error(`PHY6 OTA image too big (max ${PHY_OTA_MAX_SIZE} bytes)`);
+  if (fsize !== (fsize & 0x1FFFF0) + 4) throw new Error("Improper PHY6 OTA image size (must be 16n+4)");
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const h = {
+    id: dv.getUint32(0, true),
+    segs: dv.getUint32(4, true),
+    start: dv.getUint32(8, true),
+    size: dv.getUint32(12, true)
+  };
+  if (h.id !== PHY6_MAGIC) throw new Error("Not a PHY6 OTA image (bad magic)");
+  if (h.segs > 16) throw new Error(`Wrong number of segments (${h.segs}) in PHY6 OTA image`);
+  if (h.size + 4 !== fsize) throw new Error(`PHY6 OTA header size mismatch (header 0x${h.size.toString(16)} + 4 != file 0x${fsize.toString(16)})`);
+  const stored = dv.getUint32(h.size, true);
+  const calc = crc32raw(data.subarray(0, h.size));
+  if (stored !== calc) throw new Error(`PHY6 OTA image CRC32 mismatch (stored 0x${hex(stored,4)}, calculated 0x${hex(calc,4)})`);
+  return h;
+}
+
 // ── File input handler ──
 $("fileInput").addEventListener("change", function(e) {
   const file = e.target.files[0];
@@ -297,39 +373,77 @@ $("fileInput").addEventListener("change", function(e) {
   $("partInfo").textContent = "";
   const reader = new FileReader();
   reader.onload = function() {
+    loadedKind = null;
+    firmwarePartitions = null;
+    firmwareIssues = [];
+    pvvxImage = null;
+    pvvxBlockCount = 0;
     try {
-      const rawPartitions = parseIntelHex(reader.result);
-      firmwarePartitions = splitPartitionsForStockOta(rawPartitions);
-      firmwareIssues = analyzeFirmwareForStockOta(firmwarePartitions);
-      totalBytes = firmwarePartitions.reduce((s, p) => s + p.data.length, 0);
-      let info = `<b>${file.name}</b> — ${firmwarePartitions.length} partition(s), ${totalBytes.toLocaleString()} bytes total<br><table>`;
-      firmwarePartitions.forEach((p, i) => {
-        info += `<tr><td>Partition ${i}</td><td>0x${hex(p.address, 4)} — 0x${hex(p.address + p.data.length, 4)}</td><td>${p.data.length.toLocaleString()} B</td></tr>`;
-      });
-      info += "</table>";
-      if (rawPartitions.length !== firmwarePartitions.length) {
-        info += `<div style="color:#8a5a00; margin-top:8px">Split ${rawPartitions.length} input partition(s) into ${firmwarePartitions.length} OTA partition(s) to fit the stock OTA staging buffer.</div>`;
-      }
-      if (firmwareIssues.length) {
-        info += `<div style="color:#b71c1c; margin-top:8px"><b>Stock OTA incompatible:</b><br>${firmwareIssues.map(issue => issue.replace(/</g, "&lt;")).join("<br>")}</div>`;
-      }
-      $("fileInfo").innerHTML = info;
-      log(`Loaded ${file.name}: ${firmwarePartitions.length} partitions, ${totalBytes} bytes`);
-      if (rawPartitions.length !== firmwarePartitions.length) {
-        log(`Split raw image into ${firmwarePartitions.length} OTA partitions to satisfy stock OTA size limits.`);
-      }
-      for (const issue of firmwareIssues) {
-        log(`WARNING: ${issue}`);
+      const bytes = new Uint8Array(reader.result);
+      if (bytes.length > 0 && bytes[0] === 0x3A) { // ':' — Intel HEX text
+        loadHexFirmware(file.name, new TextDecoder("latin1").decode(bytes));
+      } else if (bytes.length >= 4 && new DataView(reader.result).getUint32(0, true) === PHY6_MAGIC) {
+        loadPhy6Firmware(file.name, bytes);
+      } else {
+        throw new Error("Unrecognized file: neither Intel HEX (':') nor PHY6 OTA bin");
       }
     } catch (err) {
       $("fileInfo").innerHTML = `<span style="color:red">Parse error: ${err.message}</span>`;
+      loadedKind = null;
       firmwarePartitions = null;
       firmwareIssues = [];
+      pvvxImage = null;
       log("ERROR: " + err.message);
     }
   };
-  reader.readAsText(file);
+  reader.readAsArrayBuffer(file);
 });
+
+function loadHexFirmware(name, text) {
+  const rawPartitions = parseIntelHex(text);
+  firmwarePartitions = splitPartitionsForStockOta(rawPartitions);
+  firmwareIssues = analyzeFirmwareForStockOta(firmwarePartitions);
+  totalBytes = firmwarePartitions.reduce((s, p) => s + p.data.length, 0);
+  loadedKind = "hex";
+  let info = `<b>${name}</b> — stock OTA image (Intel HEX), ${firmwarePartitions.length} partition(s), ${totalBytes.toLocaleString()} bytes total<br><table>`;
+  firmwarePartitions.forEach((p, i) => {
+    info += `<tr><td>Partition ${i}</td><td>0x${hex(p.address, 4)} — 0x${hex(p.address + p.data.length, 4)}</td><td>${p.data.length.toLocaleString()} B</td></tr>`;
+  });
+  info += "</table>";
+  if (rawPartitions.length !== firmwarePartitions.length) {
+    info += `<div style="color:#8a5a00; margin-top:8px">Split ${rawPartitions.length} input partition(s) into ${firmwarePartitions.length} OTA partition(s) to fit the stock OTA staging buffer.</div>`;
+  }
+  if (firmwareIssues.length) {
+    info += `<div style="color:#b71c1c; margin-top:8px"><b>Stock OTA incompatible:</b><br>${firmwareIssues.map(issue => issue.replace(/</g, "&lt;")).join("<br>")}</div>`;
+  }
+  $("fileInfo").innerHTML = info;
+  log(`Loaded ${name}: stock OTA image, ${firmwarePartitions.length} partitions, ${totalBytes} bytes`);
+  if (rawPartitions.length !== firmwarePartitions.length) {
+    log(`Split raw image into ${firmwarePartitions.length} OTA partitions to satisfy stock OTA size limits.`);
+  }
+  for (const issue of firmwareIssues) {
+    log(`WARNING: ${issue}`);
+  }
+}
+
+function loadPhy6Firmware(name, bytes) {
+  const h = validatePhy6Image(bytes);
+  // Pad to a whole number of 16-byte OTA blocks (mirrors getFwArray).
+  const padded = new Uint8Array(Math.ceil(bytes.length / 16) * 16);
+  padded.fill(0xFF);
+  padded.set(bytes);
+  pvvxImage = padded;
+  pvvxBlockCount = padded.length / 16;
+  totalBytes = padded.length;
+  loadedKind = "phy6";
+  $("fileInfo").innerHTML =
+    `<b>${name}</b> — PHY6 OTA image for the custom BTHome firmware<br>` +
+    `<table><tr><td>Segments</td><td>${h.segs}</td></tr>` +
+    `<tr><td>Run address</td><td>0x${hex(h.start, 4)}</td></tr>` +
+    `<tr><td>Payload</td><td>${h.size.toLocaleString()} B, CRC32 OK</td></tr>` +
+    `<tr><td>OTA blocks</td><td>${pvvxBlockCount} × 16 B</td></tr></table>`;
+  log(`Loaded ${name}: PHY6 OTA image, ${h.segs} segments, ${bytes.length} bytes, ${pvvxBlockCount} blocks, CRC32 OK`);
+}
 
 showVersionTag();
 log(`UI JavaScript version ${JS_VERSION}`);
@@ -633,6 +747,125 @@ async function doSHBUpload() {
   log("=== OTA FLASH COMPLETE ===");
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// pvvx BTHome OTA path (custom firmware, service 0xFCD2 / char 0xFFF3)
+// Protocol: ble_ota.c — CMD_OTA_START(0xFF00), CMD_OTA_SET(0xFF01),
+// 16-byte data blocks [idxLE|data16|crc16mLE], CMD_OTA_END(0xFF02).
+// Device status is polled by reading 0xFFF3 (20-byte ota_par_t struct).
+// ═══════════════════════════════════════════════════════════════════
+
+const PHY_OTA_ERRORS = {
+  0x00: "OK",
+  0x01: "wrong command",
+  0x02: "start not set",
+  0x03: "params not set",
+  0x04: "wrong params",
+  0x05: "wrong packet size",
+  0x06: "packet CRC error",
+  0x07: "packet loss",
+  0x08: "flash write error",
+  0x09: "packet size/overflow error",
+  0x0A: "firmware identifier error",
+  0x0B: "program CRC32 error",
+  0xFF: "OTA end (success)"
+};
+
+function phyOtaErrName(code) {
+  return PHY_OTA_ERRORS[code] || `unknown error 0x${hex(code, 1)}`;
+}
+
+async function phyReadStatus(otaChar) {
+  const dv = await otaChar.readValue();
+  return {
+    err: dv.getUint8(0),
+    version: dv.byteLength > 1 ? dv.getUint8(1) : 0,
+    startFlag: dv.byteLength > 2 ? dv.getUint8(2) : 0,
+    pktIndex: dv.byteLength >= 10 ? dv.getUint16(8, true) : 0,
+    pktTotal: dv.byteLength >= 12 ? dv.getUint16(10, true) : 0
+  };
+}
+
+async function doPhyUpload(otaChar) {
+  setStatus("Flashing (BTHome OTA)...", "active");
+
+  const props = otaChar.properties;
+  const useWWR = props.writeWithoutResponse;
+  log(`OTA char properties: read=${props.read}, write=${props.write}, writeWithoutResponse=${props.writeWithoutResponse}`);
+  const writeBlk = blk => useWWR ? otaChar.writeValueWithoutResponse(blk) : otaChar.writeValueWithResponse(blk);
+
+  let st = await phyReadStatus(otaChar);
+  log(`Device OTA version: ${st.version}`);
+
+  // CMD_OTA_START — reset OTA state on the device
+  log("Sending CMD_OTA_START (0xFF00)...");
+  await writeBlk(new Uint8Array([0x00, 0xFF]));
+  st = await phyReadStatus(otaChar);
+  if (st.err !== 0) throw new Error(`OTA start rejected: ${phyOtaErrName(st.err)}`);
+
+  // CMD_OTA_SET — no params: defaults (program offset = app sector 0x10000)
+  log("Sending CMD_OTA_SET (0xFF01)...");
+  await writeBlk(new Uint8Array([0x01, 0xFF]));
+  st = await phyReadStatus(otaChar);
+  if (st.err !== 0 || st.startFlag !== 1) throw new Error(`OTA set rejected: ${phyOtaErrName(st.err)}`);
+
+  // Stream 16-byte blocks. Status is read every 16 blocks; this doubles as
+  // flow control for write-without-response during device flash-sector erases.
+  log(`Streaming ${pvvxBlockCount} blocks (20-byte packets)...`);
+  const pkt = new Uint8Array(20);
+  for (let i = 0; i < pvvxBlockCount; i++) {
+    if (aborted) throw new Error("Aborted");
+    pkt[0] = i & 0xFF;
+    pkt[1] = (i >> 8) & 0xFF;
+    pkt.set(pvvxImage.subarray(i * 16, i * 16 + 16), 2);
+    const crc = crc16m(pkt, 18);
+    pkt[18] = crc & 0xFF;
+    pkt[19] = (crc >> 8) & 0xFF;
+    await writeBlk(pkt);
+    sentBytes = (i + 1) * 16;
+
+    const lastBlock = i === pvvxBlockCount - 1;
+    if ((i + 1) % 16 === 0 && !lastBlock) {
+      st = await phyReadStatus(otaChar);
+      if (st.err !== 0) {
+        throw new Error(`Device reported "${phyOtaErrName(st.err)}" at block ${i} (device index 0x${hex(st.pktIndex, 2)})`);
+      }
+    }
+    if (i % 64 === 0 || lastBlock) {
+      setProgress(sentBytes / totalBytes);
+      $("partInfo").textContent = `Block ${i + 1}/${pvvxBlockCount}`;
+    }
+  }
+
+  // After the final block the device verifies the whole image CRC32 and
+  // reports OTA_END (0xFF) on success.
+  log("All blocks sent. Reading final status...");
+  st = await phyReadStatus(otaChar);
+  if (st.err !== 0xFF) {
+    throw new Error(`Final check failed: ${phyOtaErrName(st.err)} (expected "OTA end")`);
+  }
+  log("Image verified by device (OTA end). Sending CMD_OTA_END (0xFF02)...");
+
+  // CMD_OTA_END makes the device drop the connection and reset; the write
+  // may therefore fail with a disconnect error — that is expected.
+  try {
+    await writeBlk(new Uint8Array([0x02, 0xFF]));
+  } catch (e) {
+    log("  (Write error during reboot command is expected — device disconnected)");
+  }
+
+  setStatus("OTA Complete!", "active");
+  setProgress(1);
+  log("=== OTA FLASH COMPLETE ===");
+  log("Device is rebooting. The boot updater installs the new image; the device should reappear as IBSTH2P-* within ~30 s.");
+}
+
+async function phyOTA() {
+  const service = await gattServer.getPrimaryService(PHY_SERVICE);
+  const otaChar = await service.getCharacteristic(PHY_OTA_CHAR);
+  log("BTHome OTA characteristic ready (FFF3).");
+  await doPhyUpload(otaChar);
+}
+
 // ── Direct OTA (connect to PPLUSOTA and flash) ──
 async function directOTA(device) {
   if (!ensureFirmwareEligibleForStockOta()) {
@@ -675,7 +908,8 @@ async function directOTA(device) {
 
 // ── Main OTA flow ──
 async function connectAndFlash() {
-  if (!ensureFirmwareEligibleForStockOta()) {
+  if (!loadedKind) {
+    log("ERROR: Load a firmware file first");
     return;
   }
   if (typeof navigator.bluetooth === "undefined") {
@@ -692,19 +926,39 @@ async function connectAndFlash() {
   let appDevice = null;
 
   try {
-    // ── Phase 1: Connect to stock device and trigger mode switch ──
-    log("Requesting BLE device with OTA service...");
+    // ── Phase 0: Connect and auto-detect the device's OTA flavor ──
+    log("Requesting BLE device (stock sps/PPlusOTA or custom IBSTH2P-*)...");
     appDevice = await navigator.bluetooth.requestDevice({
       acceptAllDevices: true,
-      optionalServices: [SHB_SERVICE]
+      optionalServices: [SHB_SERVICE, PHY_SERVICE]
     });
     log(`Selected: ${appDevice.name || "unnamed"} (${appDevice.id})`);
 
     log("Connecting GATT...");
     gattServer = await appDevice.gatt.connect();
-    log("Connected. Discovering OTA service...");
+    log("Connected. Detecting device type...");
 
-    const service = await gattServer.getPrimaryService(SHB_SERVICE);
+    const allServices = await gattServer.getPrimaryServices();
+    const serviceUUIDs = allServices.map(s => s.uuid);
+    const hasPhy = serviceUUIDs.includes(PHY_SERVICE);
+    const hasShb = serviceUUIDs.includes(SHB_SERVICE);
+
+    if (hasPhy && !hasShb) {
+      // ── Custom BTHome firmware — flash directly via pvvx OTA ──
+      log("Detected custom BTHome firmware (service FCD2). Using pvvx OTA protocol.");
+      if (!ensureFirmwareEligibleForPhyOta()) throw new Error("Wrong file type for this device");
+      await phyOTA();
+      return;
+    }
+    if (!hasShb) {
+      throw new Error("Device exposes neither the stock SHB OTA service nor the BTHome service — wrong device?");
+    }
+
+    // ── Stock SHB path (sps app mode or PPlusOTA) ──
+    log("Detected stock SHB OTA service. Using stock OTA protocol.");
+    if (!ensureFirmwareEligibleForStockOta()) throw new Error("Wrong file type for this device");
+
+    const service = allServices.find(s => s.uuid === SHB_SERVICE);
     const chars = await service.getCharacteristics();
     const charUUIDs = chars.map(c => c.uuid);
     log(`Characteristics found: ${charUUIDs.map(u => u.substring(4,8).toUpperCase()).join(", ")}`);
