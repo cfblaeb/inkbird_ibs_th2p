@@ -72,9 +72,9 @@ extern gapPeriConnectParams_t periConnParameters;
 // bytes; the stock firmware raises a GPIO for ~300 us before transmitting
 // to wake the main MCU's UART receiver.
 
-#define FRAME_START 0x52  // 'R'
-#define FRAME_END   0x45  // 'E'
-#define FRAME_SIZE  13
+#include "ucap_frame.h"
+
+#define FRAME_SIZE  UCAP_FRAME_SIZE
 
 // Raw byte capture — records first RAWCAP_SIZE bytes for debugging
 #define RAWCAP_SIZE 64
@@ -82,14 +82,11 @@ static uint8_t rawcap_buf[RAWCAP_SIZE];
 static volatile uint8_t rawcap_pos = 0;
 
 typedef struct {
-	uint8_t frame_buf[FRAME_SIZE];
-	uint8_t frame_pos;
-	uint8_t in_frame;  // 1 = collecting bytes after 'R'
+	ucap_frame_t fr;   // framing state machine (see ucap_frame.h)
 
 	// Stats
 	volatile uint32_t total_bytes;
 	volatile uint16_t good_frames;
-	volatile uint16_t bad_bytes;
 
 	// Latest parsed sensor values (updated in ISR)
 	volatile int16_t  last_temp;     // x0.01 °C
@@ -122,14 +119,9 @@ uart_capture_t ucap;
 
 static uart_Cfg_t ucap_uart_cfg;  // saved for re-init after sleep
 
+// Consume a frame already validated (marker + CRC) by ucap_frame_feed().
 static void ucap_process_frame(void) {
-	uint8_t *f = ucap.frame_buf;
-
-	// Verify end marker
-	if (f[FRAME_SIZE - 1] != FRAME_END) {
-		ucap.bad_bytes++;
-		return;
-	}
+	uint8_t *f = ucap.fr.buf;
 
 	ucap.good_frames++;
 	ucap.sensor_valid = 1;
@@ -179,20 +171,8 @@ static void ucap_callback(uart_Evt_t *pev) {
 			rawcap_buf[rawcap_pos++] = b;
 		}
 
-		if (b == FRAME_START) {
-			// Start of new frame (or restart if we were mid-frame)
-			ucap.frame_buf[0] = b;
-			ucap.frame_pos = 1;
-			ucap.in_frame = 1;
-		} else if (ucap.in_frame) {
-			ucap.frame_buf[ucap.frame_pos++] = b;
-			if (ucap.frame_pos >= FRAME_SIZE) {
-				ucap_process_frame();
-				ucap.in_frame = 0;
-			}
-		} else {
-			ucap.bad_bytes++;
-		}
+		if (ucap_frame_feed(&ucap.fr, b))
+			ucap_process_frame();
 	}
 }
 
@@ -259,7 +239,7 @@ void ucap_update_measured_data(void) {
 	} else {
 		// No valid frame yet — report negative debug counters
 		measured_data.temp = -(int16_t)(ucap.good_frames ? ucap.good_frames : 1);
-		measured_data.humi = -(int16_t)(ucap.bad_bytes ? ucap.bad_bytes : 1);
+		measured_data.humi = -(int16_t)(ucap.fr.crc_bad ? ucap.fr.crc_bad : 1);
 	}
 	// Close the grab window. Normally the first good frame already
 	// released the UART lock; this is the fallback for a window with no
@@ -1162,8 +1142,8 @@ int cmd_parser(uint8_t * obuf, uint8_t * ibuf, uint32_t len) {
 				obuf[7] = (ucap.total_bytes >> 24) & 0xFF;
 				obuf[8] = ucap.good_frames & 0xFF;
 				obuf[9] = (ucap.good_frames >> 8) & 0xFF;
-				obuf[10] = ucap.bad_bytes & 0xFF;
-				obuf[11] = (ucap.bad_bytes >> 8) & 0xFF;
+				obuf[10] = ucap.fr.crc_bad & 0xFF;
+				obuf[11] = (ucap.fr.crc_bad >> 8) & 0xFF;
 				obuf[12] = ucap.last_temp & 0xFF;
 				obuf[13] = (ucap.last_temp >> 8) & 0xFF;
 				obuf[14] = ucap.last_humi & 0xFF;
