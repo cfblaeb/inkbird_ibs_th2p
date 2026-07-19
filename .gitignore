@@ -1,3 +1,5 @@
 Nrf/
 .venv
 .idea
+build_boot_ibsth2p_*/
+__pycache__/

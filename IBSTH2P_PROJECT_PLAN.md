@@ -251,15 +251,123 @@ Implications for the custom firmware (not yet implemented):
 3. Frames can be validated with the now-known CRC instead of only the
    start/end markers.
 
+## V18: Fast-connect window after any reset (hardware-validated 2026-07-19)
+
+Problem: the Linux kernel arms its LE create-connection window for only ~4 s,
+and only after seeing an advertisement. With the IBSTH2P's 10 s advertising
+interval the next advertisement always falls outside that window, so BLE
+connections from Linux hosts (bluez/bleak/desktop Chrome) fail
+deterministically — confirmed with a btmon capture (single
+`LE Extended Create Connection` cancelled 4 s later, CONNECT_IND never sent).
+Workarounds before V18: raw-HCI extended create connection with a long budget
+(`ble_le_conn_ext.py`, needs sudo), or Android (30 s connect timeout).
+
+V18 reuses the existing pvvx fast-advertising mechanism (the same one that
+runs for 60 s after an OTA-mode boot) on *any* power-on/reset: 60 s at
+`DEF_CON_ADV_INTERVAL` (~1.56 s), after which `adv_measure()`'s existing
+`adv_reload_count` expiry path restores the configured 10 s interval.
+Steady-state battery cost: zero (only triggers on reset).
+
+Flash-from-Chrome workflow this enables: pull the battery, reinsert, and
+connect within ~60 s — no sudo tooling required.
+
+Validated on hardware: `IBS-V18` read via a plain no-sudo bleak connect
+during the post-reboot window; steady state returns to 10 s advertising.
+
+## V19: UART framing fix — CRC validation + resync (hardware-validated 2026-07-20)
+
+Two defects in the V10..V18 frame parser (`cmd_parser.c`):
+
+1. It restarted frame collection on *any* 0x52 ('R') byte, including inside
+   a frame. Payload bytes can legally be 0x52 — notably main-MCU battery
+   byte [9] at 82% — in which case *every* frame breaks for as long as the
+   value persists: stale temperature/humidity keep advertising, button
+   detection goes blind, and the V16 early sleep-release never fires (10 s
+   awake per grab window again). The device battery was at 80–83% when this
+   was found.
+2. The stock protocol's CRC-16/MODBUS (bytes [10..11] over [1..9]) was
+   never checked, so corrupted UART bytes were accepted into temperature/
+   humidity/button state.
+
+V19 moves framing into `bthome_phy6222/source/ucap_frame.h` (SDK-independent
+header): frames are accepted only with a valid end marker *and* CRC; on
+validation failure the buffer resyncs by sliding to the next 'R' inside it
+(mid-frame 'R' bytes never restart collection). `crc_bad` and `noise`
+counters replace the old `bad_bytes` in the debug fallback and the stats
+dump command. Note: the ROM symbol table provides `memcpy` but not
+`memmove`; the resync shift is a manual forward loop.
+
+Host unit tests: `bthome_phy6222/tests/test_ucap_frame.c`
+(`gcc -o t test_ucap_frame.c && ./t`) — 11 checks including the batt=82%
+regression, corrupted-button-byte rejection, truncation resync, and a
+pseudo-random-noise false-frame sweep.
+
+Validated on hardware: flashed via InkbirdOTA.html in desktop Chrome using
+the V18 battery-pull window (first end-to-end proof of that path);
+`IBS-V19` confirmed and live sensor frames parsed (temp/humidity plausible,
+battery reading in the 82% danger zone at the time).
+
+## Reproducible builds on Ubuntu 24.04 (toolchain recipe)
+
+The shipped V15+ hexes were built with Debian gcc-arm-none-eabi
+15:14.2.rel1-1 / binutils 2.42 / newlib 4.5.0.20241231-1. Ubuntu 24.04
+packages gcc 13.2 for arm-none-eabi (different codegen — do not use for
+release builds). Working recipe without root:
+
+1. Download from snapshot.debian.org and extract with `dpkg -x` into a
+   scratch dir (`$TC/root`): `gcc-arm-none-eabi_14.2.rel1-1_amd64.deb`,
+   `libnewlib-arm-none-eabi_4.5.0.20241231-1_all.deb`,
+   `libnewlib-dev_4.5.0.20241231-1_all.deb`. Ubuntu's system
+   `binutils-arm-none-eabi` 2.42-1ubuntu1+23 provides as/ld (matches the
+   2.42 the original build used).
+2. Create `$TC/xbin` with `as`/`ld` symlinks to `/usr/bin/arm-none-eabi-{as,ld}`.
+3. Build:
+
+```bash
+PATH=$TC/root/usr/bin:$PATH make -B -C bthome_phy6222 \
+  OBJ_DIR=build_boot_ibsth2p_vXX PROJECT_NAME=BOOT_IBSTH2P \
+  PROJECT_DEF="-DDEVICE=DEVICE_IBSTH2P" BOOT_OTA=1 \
+  CROSS_COMPILE="arm-none-eabi-" \
+  CC="arm-none-eabi-gcc -B$TC/xbin -B$TC/root/usr/lib/arm-none-eabi/newlib \
+      -isystem $TC/root/usr/include/newlib"
+```
+
+Output is functionally identical to the shipped hexes but not raw
+byte-identical: GNU ld emits its long-branch veneers in a different order,
+which shifts BL immediates. Equivalence is machine-checkable — every BL must
+resolve through the veneers to the same final target and the veneer target
+multisets must match (verified for V15/V16/V17 rebuilds vs the shipped,
+hardware-validated hexes).
+
+## Flashing paths (current)
+
+- **Custom firmware (V18+), from anywhere incl. desktop Chrome**: pull the
+  battery, load `inkbird_fw/BOOT_IBSTH2P_vXX_ota.bin` in
+  `inkbird_fw/InkbirdOTA.html`, Connect & Flash within ~60 s. The page
+  auto-detects stock SHB vs custom BTHome devices by GATT services and
+  validates the file kind (.hex/.hex16 = stock path, PHY6 `_ota.bin` = pvvx
+  path). Interrupted pvvx transfers are safe: the device only writes the
+  PHY6 magic after the whole staged image passes CRC32.
+- **Custom firmware, scripted from Linux**: `ble_phy_ota_flash.py <ota.bin>`
+  (waits for an ACL link); pre-V18 firmwares additionally need
+  `sudo ble_le_conn_ext.py` to open the link (kernel 4 s limit).
+- **Stock firmware**: unchanged stage3 stock-bundle path
+  (`STAGE3_*_stock_bundle_installer.hex16` via InkbirdOTA.html).
+- OTA bins are produced by
+  `python3 phy62x2_ota.py -w 0x2F00 -f ota_upboot.add <hex>` (in
+  `bthome_phy6222/`) — verified to reproduce the hardware-proven
+  `BOOT_IBSTH2P_v15_ota.bin` byte-for-byte.
+
 ## Next Work
 
-1. Keep `master` reproducible against the verified V15 runtime.
-2. Reintroduce useful code from `ibsth2p-current-experimental` in small,
+1. Measure battery behavior of V16+ (early UART sleep-release) against the
+   V15 baseline over time.
+2. Consider a stuck-connection watchdog (a held BLE connection costs ~mA due
+   to the `MOD_USR0` full-awake lock) and a lower default TX power.
+3. Verify Home Assistant behavior (BTHome sensors + V17 button trigger)
+   against the current build.
+4. Reintroduce useful code from `ibsth2p-current-experimental` in small,
    validated slices.
-3. Verify Home Assistant behavior against the successful stock-installed build.
-4. Measure battery behavior of the installed V15 runtime over time.
-5. Clean up or archive no-longer-needed experimental artifacts once the working
-   path is fully documented and preserved.
 
 ## Historical Note
 
