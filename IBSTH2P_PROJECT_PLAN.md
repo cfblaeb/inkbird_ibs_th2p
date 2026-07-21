@@ -363,7 +363,44 @@ hardware-validated hexes).
   `bthome_phy6222/`) — verified to reproduce the hardware-proven
   `BOOT_IBSTH2P_v15_ota.bin` byte-for-byte.
 
-## Button responsiveness options (V20 candidates, 2026-07-21)
+## V20: BTHome firmware version in the advertisement (pending hardware validation)
+
+The BTHome payload now ends with the firmware version object (id 0xF2,
+uint24, little-endian patch/minor/major). Home Assistant's BTHome
+integration reads it into the device's firmware-version field, so a fleet
+of units can be audited for firmware level passively, without connecting
+to read the Software Revision characteristic.
+
+Implementation notes:
+
+- The version number comes from a single macro, `IBS_FW_VERSION` in
+  `config.h` (currently 20). It generates both the `IBS-VNN` Software
+  Revision string and the advertised BTHome version `NN.0.0` — bump one
+  number per release, nothing else to keep in sync.
+- Object id 0xF2 is the highest sent, preserving BTHome's ascending object
+  order. Advert grows 21 → 25 bytes (limit 31).
+- The version object and the V17 button object are mutually exclusive:
+  during a button burst the packet carries the button instead of the
+  version (23 bytes), and the version returns on the first post-burst
+  packet. This bounds the worst case of a hypothetical encrypted build
+  (8 bytes counter+MIC overhead) at exactly 31 bytes.
+- `bthome_monitor.py` decodes 0xF2 and shows it in a new FW column
+  (latched across button bursts).
+- This takes the V20 number; the button-responsiveness candidates below
+  become V21 when implemented.
+
+Validation steps:
+
+1. Flash the build (direct UART, or OTA via
+   `make_stock_stage3_bundle.py --final-hex <new hex>`).
+2. Confirm `IBS-V20` in the Software Revision characteristic.
+3. Confirm `bthome_monitor.py` shows FW `20.0.0` and that
+   temperature/humidity/battery decode unchanged.
+4. In HA, confirm the BTHome device shows firmware version 20.0.0 and a
+   button press still fires exactly one event (version object absent
+   during the burst must not confuse the integration).
+
+## Button responsiveness options (V21 candidates, 2026-07-21)
 
 Background: the stock inter-chip frame carries no press counter — payload is
 fully decoded (see protocol section) and the main MCU is not field-updatable,

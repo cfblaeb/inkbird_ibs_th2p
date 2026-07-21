@@ -101,7 +101,10 @@ typedef enum {
 	BtHomeID_acceleration = 0x51,	//0x51, uint16, 0.001
 	BtHomeID_gyroscope = 0x52,		//0x52, uint16, 0.001
 	BtHomeID_text = 0x53,			//0x53, size uint8, uint8[]
-	BtHomeID_raw = 0x54				//0x54, size uint8, uint8[]
+	BtHomeID_raw = 0x54,			//0x54, size uint8, uint8[]
+	BtHomeID_device_type = 0xf0,	//0xf0, uint16, device type id
+	BtHomeID_fw_version32 = 0xf1,	//0xf1, uint32, fw version, LE: build, patch, minor, major
+	BtHomeID_fw_version24 = 0xf2	//0xf2, uint24, fw version, LE: patch, minor, major
 } BtHomeIDs_e;
 
 typedef struct __attribute__((packed)) _adv_head_bth_t {
