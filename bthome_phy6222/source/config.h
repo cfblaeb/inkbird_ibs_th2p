@@ -107,7 +107,11 @@
 #endif
 
 #if DEVICE == DEVICE_IBSTH2P
-#define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'V', '1', '9', 0}
+// Single source of the IBSTH2P firmware version: NN yields the "IBS-VNN"
+// Software Revision string and the BTHome firmware version object
+// (advertised as NN.0.0, see adv_set_data() in bthome_beacon.c).
+#define IBS_FW_VERSION	20
+#define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'V', '0' + (IBS_FW_VERSION / 10), '0' + (IBS_FW_VERSION % 10), 0}
 #elif OTA_TYPE == OTA_TYPE_BOOT
 #define DEF_SOFTWARE_REVISION	{'B', '0'+ (APP_VERSION >> 4), '.' , '0'+ (APP_VERSION & 0x0F), 0}
 #else

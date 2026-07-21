@@ -90,6 +90,23 @@ uint8_t adv_set_data(void * pd) {
 		b[0] = BtHomeID_button; // 0x3a
 		b[1] = 0x01;            // 0x01 = press
 		len += 2;
+	} else {
+		// Append the BTHome firmware version object (0xf2, uint24
+		// little-endian: patch, minor, major) so Home Assistant shows
+		// "IBS_FW_VERSION.0.0" as the device firmware version. Object id
+		// 0xf2 is the highest we send, keeping the required ascending
+		// object order. Mutually exclusive with the button object above:
+		// that bounds the worst-case advertisement (encrypted build,
+		// 8 bytes counter+MIC overhead) at exactly the 31-byte legacy
+		// limit; the plain build stays at 25 bytes. The version returns
+		// with the first post-burst packet, so it is only absent for the
+		// ~60 s button hold.
+		uint8_t *b = (uint8_t *)pd + len;
+		b[0] = BtHomeID_fw_version24; // 0xf2
+		b[1] = 0;                     // patch
+		b[2] = 0;                     // minor
+		b[3] = IBS_FW_VERSION;        // major ("VNN" -> NN.0.0)
+		len += 4;
 	}
 #endif
 	return len;

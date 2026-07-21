@@ -35,6 +35,7 @@ OBJECTS = {
     0x2E: ("humidity_%",     1, False, 1),
     0x2F: ("temperature_C",  1, True,  1),
     0x3A: ("button_event",   1, False, 1),
+    0xF2: ("fw_version",     3, False, 1),
 }
 
 
@@ -52,7 +53,11 @@ def decode_bthome(data: bytes) -> dict:
         name, length, signed, scale = OBJECTS[obj]
         raw = int.from_bytes(data[i:i + length], "little", signed=signed)
         i += length
-        out[name] = round(raw * scale, 3)
+        if obj == 0xF2:
+            # uint24 firmware version: bytes are patch, minor, major (LE)
+            out[name] = f"{(raw >> 16) & 0xFF}.{(raw >> 8) & 0xFF}.{raw & 0xFF}"
+        else:
+            out[name] = round(raw * scale, 3)
     return out
 
 
@@ -74,7 +79,8 @@ def fmt_age(t_event, now):
 
 class DevState:
     __slots__ = ("addr", "name", "rssi", "payload", "values",
-                 "last_new", "last_repeat", "repeats", "last_button")
+                 "last_new", "last_repeat", "repeats", "last_button",
+                 "fw_version")
 
     def __init__(self, addr):
         self.addr = addr
@@ -86,6 +92,7 @@ class DevState:
         self.last_repeat = None
         self.repeats = 0
         self.last_button = None
+        self.fw_version = None
 
 
 devices = {}   # addr -> DevState
@@ -126,8 +133,8 @@ def make_callback(flt):
 
 
 HEADER = (f"{'ADDRESS':<18}{'NAME':<16}{'RSSI':>5} {'PID':>4} {'TEMP°C':>7} "
-          f"{'HUM%':>6} {'BATT':>5} {'VOLT':>6} {'NEW':>7} {'REP':>7} "
-          f"{'(xN)':>6} {'BUTTON':>8}")
+          f"{'HUM%':>6} {'BATT':>5} {'VOLT':>6} {'FW':>7} {'NEW':>7} "
+          f"{'REP':>7} {'(xN)':>6} {'BUTTON':>8}")
 
 
 def draw(stdscr):
@@ -150,11 +157,16 @@ def draw(stdscr):
         humi = v.get("humidity_%")
         batt = v.get("battery_%")
         volt = v.get("voltage_V")
+        # fw_version leaves the advertisement during a button burst; latch
+        # the last seen value so the column doesn't flicker to '-'.
+        if "fw_version" in v:
+            d.fw_version = v["fw_version"]
         line = (f"{d.addr:<18}{d.name[:15]:<16}{d.rssi:>5} {pid!s:>4} "
                 f"{f'{temp:.2f}' if temp is not None else '-':>7} "
                 f"{f'{humi:.2f}' if humi is not None else '-':>6} "
                 f"{str(batt) + '%' if batt is not None else '-':>5} "
                 f"{f'{volt:.3f}' if volt is not None else '-':>6} "
+                f"{d.fw_version or '-':>7} "
                 f"{fmt_age(d.last_new, now):>7} "
                 f"{fmt_age(d.last_repeat, now):>7} "
                 f"{'(x' + str(d.repeats) + ')':>6} ")
