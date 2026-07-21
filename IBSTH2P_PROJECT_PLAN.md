@@ -404,10 +404,33 @@ Implementation notes:
 - This takes the V20 number; the button-responsiveness candidates below
   become V21 when implemented.
 
+Built artifacts (committed, pending hardware validation):
+
+- `inkbird_fw/BOOT_IBSTH2P_v20.hex` — direct UART flash
+- `inkbird_fw/BOOT_IBSTH2P_v20_ota.bin` — pvvx-path OTA (InkbirdOTA.html on
+  a device already running custom firmware, or `ble_phy_ota_flash.py`)
+- `inkbird_fw/STAGE3_IBSTH2P_v20_stock_bundle_installer.hex16` (+ payload
+  bin) — stock-path OTA for devices still on Inkbird firmware
+
+Build provenance: pinned toolchain per the recipe below (Debian
+gcc-arm-none-eabi 15:14.2.rel1-1 + Ubuntu 24.04 binutils 2.42-1ubuntu1+23
++ newlib 4.5.0.20241231-1). The environment was validated before building
+V20: the same setup rebuilt master (V19 source) into a hex byte-identical
+to the shipped hardware-validated `BOOT_IBSTH2P_v19.hex` (after CRLF
+normalization — this toolchain reproduces even the veneer order), and both
+packagers regenerated the committed v19 artifacts byte-for-byte
+(`phy62x2_ota.py` → `BOOT_IBSTH2P_v19_ota.bin`;
+`make_stock_stage3_bundle.py` defaults → the committed v19 STAGE3 bundle
+and payload). The v19 artifact set stays in the tree as the validated
+fallback until V20 passes hardware validation; `make_stock_stage3_bundle.py`
+keeps defaulting to the v19 hex for the same reason.
+
 Validation steps:
 
-1. Flash the build (direct UART, or OTA via
-   `make_stock_stage3_bundle.py --final-hex <new hex>`).
+1. Flash the build: `BOOT_IBSTH2P_v20_ota.bin` via InkbirdOTA.html for
+   devices on custom firmware (battery-pull fast window),
+   `STAGE3_IBSTH2P_v20_stock_bundle_installer.hex16` for stock devices,
+   or direct UART with the v20 hex.
 2. Confirm `IBS-V20` in the Software Revision characteristic.
 3. Confirm `bthome_monitor.py` shows FW `20.0.0` and that
    temperature/humidity/battery decode unchanged.
