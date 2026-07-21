@@ -69,6 +69,7 @@ extern "C"
 #define BUZZER_TONE_EVT       0x0100  // Buzzer new tone
 #define KEY_CHANGE_EVT        0x0200  // Key press/release event from interrupt
 #define LCD_TIMER_EVT         0x0400  // Timer related to display sleep and key long press feature expired
+#define SBP_PROBE_EVT         0x0800  // UCAP_PROBE: new UART frame logged, stream it over BLE
 
 /*********************************************************************
  * MACROS

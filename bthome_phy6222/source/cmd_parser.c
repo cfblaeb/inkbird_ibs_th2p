@@ -81,6 +81,33 @@ extern gapPeriConnectParams_t periConnParameters;
 static uint8_t rawcap_buf[RAWCAP_SIZE];
 static volatile uint8_t rawcap_pos = 0;
 
+#ifdef UCAP_PROBE
+// Frame-period probe: timestamp every valid frame so inter-frame deltas
+// and the button byte can be read out over BLE (debug cmd op 4, plus a
+// live notification per frame — see probe_make_msg / probe_notify).
+// Ring of the last PROBE_LOG_SIZE frames; probe_cnt is the monotonic
+// total, so entry i lives at probe_log[i % PROBE_LOG_SIZE].
+#define PROBE_LOG_SIZE 64
+typedef struct __attribute__((packed)) {
+	uint32_t tik;    // RTC count at frame validation, 32768 Hz, 24 bit
+	uint8_t  type7;  // frame[7]: frame type
+	uint8_t  flags8; // frame[8]: button-latched BLE state
+} probe_rec_t;
+static probe_rec_t probe_log[PROBE_LOG_SIZE];
+static volatile uint16_t probe_cnt = 0;
+
+// Raw RTC counter read (AP_AON->RTCCNT, 24-bit @32768 Hz, wraps every
+// 512 s — the host tooling handles wrap on deltas). Self-contained and
+// ISR-safe; same double-read pattern as the reference in config.h.
+static uint32_t probe_rtc(void) {
+	uint32_t t;
+	do {
+		t = *(volatile uint32_t *)0x4000f028;
+	} while (t != *(volatile uint32_t *)0x4000f028);
+	return t & 0xFFFFFF;
+}
+#endif // UCAP_PROBE
+
 typedef struct {
 	ucap_frame_t fr;   // framing state machine (see ucap_frame.h)
 
@@ -148,6 +175,20 @@ static void ucap_process_frame(void) {
 		ucap.btn_clicks++;
 	}
 
+#ifdef UCAP_PROBE
+	// Log the frame and wake the app task to stream it over BLE if a
+	// client is listening (osal_set_event is ISR-safe).
+	{
+		probe_rec_t *r = &probe_log[probe_cnt % PROBE_LOG_SIZE];
+		r->tik = probe_rtc();
+		r->type7 = f[7];
+		r->flags8 = f[8];
+		probe_cnt++;
+		osal_set_event(simpleBLEPeripheral_TaskID, SBP_PROBE_EVT);
+	}
+	// Probe build: keep the UART power lock permanently — the whole point
+	// is to observe every frame, not just grab windows.
+#else
 	// Got a fresh frame: release the UART power lock now so the chip can
 	// sleep for the remainder of the grab window. read_sensors() will
 	// copy the captured values at the end of the window as before.
@@ -156,6 +197,7 @@ static void ucap_process_frame(void) {
 		ucap.grab_active = 0;
 		hal_pwrmgr_unlock(MOD_UART0);
 	}
+#endif
 }
 
 static void ucap_callback(uart_Evt_t *pev) {
@@ -218,6 +260,11 @@ uint32_t ucap_get_clicks(void) {
 // Re-init UART hardware and lock to prevent sleep during grab window.
 // Called from start_measure() one adv cycle before read_sensors().
 void ucap_start_grab(void) {
+#ifdef UCAP_PROBE
+	// Probe build: UART is permanently powered and locked since ucap_init;
+	// a deinit/init here would only risk corrupting an in-flight frame.
+	return;
+#endif
 	if (ucap.uart_inited) {
 		// After sleep, UART hardware is powered down.
 		// Lock alone doesn't restore it — must deinit+init to reconfigure.
@@ -241,6 +288,7 @@ void ucap_update_measured_data(void) {
 		measured_data.temp = -(int16_t)(ucap.good_frames ? ucap.good_frames : 1);
 		measured_data.humi = -(int16_t)(ucap.fr.crc_bad ? ucap.fr.crc_bad : 1);
 	}
+#ifndef UCAP_PROBE
 	// Close the grab window. Normally the first good frame already
 	// released the UART lock; this is the fallback for a window with no
 	// frames (unlock of an already-unlocked module is a harmless no-op).
@@ -248,7 +296,42 @@ void ucap_update_measured_data(void) {
 		ucap.grab_active = 0;
 		hal_pwrmgr_unlock(MOD_UART0);
 	}
+#endif
 }
+
+#ifdef UCAP_PROBE
+// Build the live probe notification for the most recent frame:
+// [0]=CMD_ID_I2C_SCAN, [1]=0x51 (live marker), [2..3]=probe_cnt u16 LE,
+// [4..7]=tik u32 LE (24-bit RTC @32768 Hz), [8]=type7, [9]=flags8,
+// [10..11]=delta to previous frame in ms u16 LE (0xFFFF = unknown/>65 s).
+// Called from task context (SBP_PROBE_EVT); returns 0 if nothing logged.
+uint8_t probe_make_msg(uint8_t *pbuf) {
+	uint16_t cnt = probe_cnt;
+	if (cnt == 0)
+		return 0;
+	probe_rec_t *r = &probe_log[(uint16_t)(cnt - 1) % PROBE_LOG_SIZE];
+	uint32_t dt_ms = 0xFFFF;
+	if (cnt >= 2) {
+		probe_rec_t *p = &probe_log[(uint16_t)(cnt - 2) % PROBE_LOG_SIZE];
+		uint32_t dt = (r->tik - p->tik) & 0xFFFFFF; // wrap-safe, 24 bit
+		if (dt < ((uint32_t)65 << 15)) // < 65 s: *1000 cannot overflow
+			dt_ms = (dt * 1000) >> 15;
+	}
+	pbuf[0] = CMD_ID_I2C_SCAN;
+	pbuf[1] = 0x51;
+	pbuf[2] = cnt & 0xFF;
+	pbuf[3] = (cnt >> 8) & 0xFF;
+	pbuf[4] = r->tik & 0xFF;
+	pbuf[5] = (r->tik >> 8) & 0xFF;
+	pbuf[6] = (r->tik >> 16) & 0xFF;
+	pbuf[7] = 0;
+	pbuf[8] = r->type7;
+	pbuf[9] = r->flags8;
+	pbuf[10] = dt_ms & 0xFF;
+	pbuf[11] = (dt_ms >> 8) & 0xFF;
+	return 12;
+}
+#endif // UCAP_PROBE
 
 #else // !DEVICE_IBSTH2P — V7 scan infrastructure for other devices
 
@@ -1176,6 +1259,31 @@ int cmd_parser(uint8_t * obuf, uint8_t * ibuf, uint32_t len) {
 				} else {
 					olen = 4;
 				}
+#ifdef UCAP_PROBE
+			} else if (op == 4) {
+				// Frame-period probe log dump. ibuf[2..3] = start index
+				// (monotonic frame number); returns up to 2 records of
+				// 6 bytes each: tik u32 LE (24-bit RTC), type7, flags8.
+				// Header: [1]=0x50, [2..3]=probe_cnt, [4..5]=start idx.
+				// Indices older than the ring (probe_cnt - 64) or >= cnt
+				// return no records — the client walks from
+				// max(0, cnt-64) to cnt-1.
+				uint16_t idx = (len > 3) ? (uint16_t)(ibuf[2] | (ibuf[3] << 8)) : 0;
+				uint16_t cnt = probe_cnt;
+				uint16_t first = (cnt > PROBE_LOG_SIZE) ? (uint16_t)(cnt - PROBE_LOG_SIZE) : 0;
+				obuf[1] = 0x50;
+				obuf[2] = cnt & 0xFF;
+				obuf[3] = (cnt >> 8) & 0xFF;
+				obuf[4] = idx & 0xFF;
+				obuf[5] = (idx >> 8) & 0xFF;
+				olen = 6;
+				for (int k = 0; k < 2; k++, idx++) {
+					if (idx < first || idx >= cnt)
+						break;
+					memcpy(&obuf[olen], &probe_log[idx % PROBE_LOG_SIZE], sizeof(probe_rec_t));
+					olen += sizeof(probe_rec_t);
+				}
+#endif
 			} else {
 				obuf[1] = 0xFF;
 				olen = 2;

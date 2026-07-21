@@ -81,6 +81,9 @@ void new_ota_data(void);
 void wrk_notify(void);
 void measure_notify(void);
 uint16_t make_measure_msg(uint8_t *pbuf);
+#ifdef UCAP_PROBE
+void probe_notify(void); // frame-period probe: notify latest logged frame
+#endif
 
 #ifdef __cplusplus
 }

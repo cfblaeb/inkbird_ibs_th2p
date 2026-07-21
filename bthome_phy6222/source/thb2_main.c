@@ -803,6 +803,14 @@ uint16_t BLEPeripheral_ProcessEvent( uint8_t task_id, uint16_t events )
 		return ( events ^ BUZZER_TONE_EVT);
 	}
 #endif
+#ifdef UCAP_PROBE
+	if( events & SBP_PROBE_EVT) {
+		// Frame-period probe: a new UART frame was logged in the ISR;
+		// stream it to a connected client (no-op if none listening).
+		probe_notify();
+		return ( events ^ SBP_PROBE_EVT);
+	}
+#endif
 	if( events & TIMER_BATT_EVT) {
 		LOG("TIMER_EVT\n");
 		get_utc_time_sec(); // счет UTC timestamp

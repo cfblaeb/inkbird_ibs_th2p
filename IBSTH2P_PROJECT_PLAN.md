@@ -468,6 +468,44 @@ Validation steps:
    one event (version object absent during the burst must not confuse
    the integration).
 
+## Frame-period probe build (branch `v21-frame-probe`, experimental)
+
+Purpose: run the prerequisite experiment for the V21 button-responsiveness
+decision (see next section) — measure (a) the main MCU's real inter-frame
+period and (b) whether a button press emits an immediate extra frame.
+
+This branch (based on V20) hardcodes `UCAP_PROBE` in `config.h`:
+
+- UART RX is permanently powered and locked (never sleeps, ~1-2 mA —
+  bench use only, do not deploy). Sensor/button/BTHome behavior is
+  otherwise V20.
+- Every valid frame is timestamped (24-bit RTC @32768 Hz, wraps 512 s)
+  into a 64-entry ring with frame bytes [7] (type) and [8] (button
+  level).
+- Debug command op 4 (`CMD_ID_I2C_SCAN`, char 0xFFF4) dumps the ring;
+  while notifications are enabled on 0xFFF4, each frame is also streamed
+  live (marker 0x51 with delta-ms precomputed).
+- Software Revision reads `IBS-X20` ('X' = experimental probe).
+
+Artifacts: `inkbird_fw/BOOT_IBSTH2P_x20_frameprobe.hex` /
+`..._ota.bin` (pvvx OTA path), built with the validated pinned toolchain.
+
+How to run the experiment:
+
+1. Flash `BOOT_IBSTH2P_x20_frameprobe_ota.bin` on one bench unit
+   (battery-pull + InkbirdOTA.html as usual). Confirm `IBS-X20`.
+2. `python3 frame_probe_monitor.py <MAC>` — live mode. Let it run a few
+   minutes to see the steady frame cadence, then press the device button
+   several times: if a frame with a flipped btn byte arrives within ~a
+   second of the press, the main MCU pushes presses immediately and
+   wake-on-RX (option 2) is effectively lossless; if the flip only shows
+   on the next periodic frame, the frame period is the latency floor.
+3. `python3 frame_probe_monitor.py <MAC> --dump` — fetches the ring and
+   prints min/median/max frame period (answers (a), fixing option 1's
+   real battery cost and loss window).
+4. Record both answers in this plan, pick option 1 or 2 for V21, then
+   reflash the unit with the release V20 image.
+
 ## Button responsiveness options (V21 candidates, 2026-07-21)
 
 Background: the stock inter-chip frame carries no press counter — payload is

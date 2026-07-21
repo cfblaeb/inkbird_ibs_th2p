@@ -107,11 +107,22 @@
 #endif
 
 #if DEVICE == DEVICE_IBSTH2P
+// Frame-period probe build (V21 groundwork, experimental branch only):
+// always-on UART RX, per-frame timestamp log, live BLE notifications.
+// Answers (a) the main MCU's real frame period and (b) whether a button
+// press emits an immediate extra frame. Costs 1-2 mA continuously — for
+// bench experiments only, do not deploy for normal use.
+#define UCAP_PROBE	1
 // Single source of the IBSTH2P firmware version: NN yields the "IBS-VNN"
 // Software Revision string and the BTHome firmware version object
 // (advertised as NN.0.0, see adv_set_data() in bthome_beacon.c).
 #define IBS_FW_VERSION	20
+#ifdef UCAP_PROBE
+// 'X' instead of 'V' marks a probe image in the revision characteristic.
+#define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'X', '0' + (IBS_FW_VERSION / 10), '0' + (IBS_FW_VERSION % 10), 0}
+#else
 #define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'V', '0' + (IBS_FW_VERSION / 10), '0' + (IBS_FW_VERSION % 10), 0}
+#endif
 #elif OTA_TYPE == OTA_TYPE_BOOT
 #define DEF_SOFTWARE_REVISION	{'B', '0'+ (APP_VERSION >> 4), '.' , '0'+ (APP_VERSION & 0x0F), 0}
 #else

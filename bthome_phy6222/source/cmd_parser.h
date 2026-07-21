@@ -109,6 +109,9 @@ int cmd_parser(uint8_t * obuf, uint8_t * ibuf, uint32_t len);
 int ucap_init(void);
 void ucap_start_grab(void);
 void ucap_update_measured_data(void);
+#ifdef UCAP_PROBE
+uint8_t probe_make_msg(uint8_t *pbuf); // frame-period probe live message
+#endif
 #endif
 
 #ifdef __cplusplus
