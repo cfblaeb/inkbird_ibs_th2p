@@ -506,6 +506,33 @@ void measure_notify(void) {
 	linkDB_PerformFunc( measureNotifyCB );
 }
 
+#ifdef UCAP_PROBE
+// Frame-period probe: stream the latest logged UART frame to any client
+// with notifications enabled on the CMD characteristic (0xFFF4). Same
+// pattern as measure_notify above.
+static void probeNotifyCB( linkDBItem_t* pLinkItem )
+{
+	if ( pLinkItem->stateFlags & LINK_CONNECTED )
+	{
+		uint16 value = GATTServApp_ReadCharCfg( pLinkItem->connectionHandle,
+				simpleProfileChar2Config );
+
+		if ( value & GATT_CLIENT_CFG_NOTIFY )
+		{
+			attHandleValueNoti_t noti;
+			noti.handle = simpleProfileAttrTbl[CDM_DATA_ATTR_IDX].handle;
+			noti.len = probe_make_msg(noti.value);
+			if (noti.len)
+				GATT_Notification( pLinkItem->connectionHandle, &noti, FALSE );
+		}
+	}
+}
+
+void probe_notify(void) {
+	linkDB_PerformFunc( probeNotifyCB );
+}
+#endif // UCAP_PROBE
+
 #if (DEV_SERVICES & SERVICE_HISTORY)
 void wrk_notify(void) {
 	gattServerInfo_t* pServer;
