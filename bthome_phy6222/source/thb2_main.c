@@ -1124,6 +1124,14 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 		break;
 
 		case GAPROLE_WAITING:
+		// A link killed by supervision timeout (client walked out of range,
+		// died, or was killed without disconnecting) reports
+		// WAITING_AFTER_TIMEOUT instead of WAITING. It needs the same
+		// cleanup, most critically the MOD_USR0 unlock: before V20 this
+		// path leaked the sleep lock, leaving the chip fully awake
+		// (~1-2 mA) while advertising normally, until the next clean
+		// connect/disconnect cycle or a battery pull.
+		case GAPROLE_WAITING_AFTER_TIMEOUT:
 			LOG("Gaprole_Disconnection\n");
 			osal_stop_timerEx(simpleBLEPeripheral_TaskID, TIMER_BATT_EVT);
 #if DEVICE == DEVICE_IBSTH2P
@@ -1147,10 +1155,6 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 				write_reg(OTA_MODE_SELECT_REG, wrk.reboot);
 				hal_system_soft_reset();
 			}
-		break;
-
-		case GAPROLE_WAITING_AFTER_TIMEOUT:
-			LOG("Gaprole_waitting_after_timerout\n");
 		break;
 
 		case GAPROLE_ERROR:
