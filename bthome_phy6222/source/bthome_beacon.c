@@ -92,10 +92,14 @@ uint8_t adv_set_data(void * pd) {
 		len += 2;
 	} else {
 		// Append the BTHome firmware version object (0xf2, uint24
-		// little-endian: patch, minor, major) so Home Assistant shows
-		// "IBS_FW_VERSION.0.0" as the device firmware version. Object id
-		// 0xf2 is the highest we send, keeping the required ascending
-		// object order. Mutually exclusive with the button object above:
+		// little-endian: patch, minor, major), readable by any scanner
+		// implementing the full BTHome v2 spec (e.g. bthome_monitor.py).
+		// Note: Home Assistant's bthome-ble parser (verified at 3.23.5)
+		// does not know 0xf2 yet; because it is the last object it is
+		// ignored without affecting the sensor entities, and it will
+		// surface automatically once bthome-ble learns the device-info
+		// objects. Object id 0xf2 is the highest we send, keeping the
+		// required ascending object order. Mutually exclusive with the button object above:
 		// that bounds the worst-case advertisement (encrypted build,
 		// 8 bytes counter+MIC overhead) at exactly the 31-byte legacy
 		// limit; the plain build stays at 25 bytes. The version returns

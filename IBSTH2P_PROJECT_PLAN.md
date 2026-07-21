@@ -366,10 +366,25 @@ hardware-validated hexes).
 ## V20: BTHome firmware version in the advertisement (pending hardware validation)
 
 The BTHome payload now ends with the firmware version object (id 0xF2,
-uint24, little-endian patch/minor/major). Home Assistant's BTHome
-integration reads it into the device's firmware-version field, so a fleet
-of units can be audited for firmware level passively, without connecting
-to read the Software Revision characteristic.
+uint24, little-endian patch/minor/major), so the firmware level can be
+read passively by any scanner implementing the full BTHome v2 spec,
+without connecting to read the Software Revision characteristic.
+
+Home Assistant caveat (verified against bthome-ble 3.23.5, the parser HA
+uses, by feeding it the exact V20 payload): bthome-ble does not implement
+the device-information objects (0xF0/0xF1/0xF2) yet. It logs a debug-level
+"Invalid Object ID" and stops at that object — harmless here because 0xF2
+is last, and the resulting entities are byte-for-byte identical to a V19
+packet (battery/temperature/humidity/voltage/packet id all intact). HA
+keeps showing "BTHome BLE v2" as the device firmware until bthome-ble
+learns 0xF2, at which point already-deployed V20 devices surface their
+version with no reflash. `bthome_monitor.py` shows it today.
+
+If HA visibility is wanted *now*, the working alternative (verified with
+the same parser) is the BTHome text object 0x53 carrying e.g. "IBS-V20"
+(9 bytes vs 4), which HA exposes as an extra "Text" sensor entity rather
+than the device firmware field. Not implemented — entity clutter vs a
+debug-only object was judged the worse trade; revisit on request.
 
 Implementation notes:
 
@@ -396,9 +411,10 @@ Validation steps:
 2. Confirm `IBS-V20` in the Software Revision characteristic.
 3. Confirm `bthome_monitor.py` shows FW `20.0.0` and that
    temperature/humidity/battery decode unchanged.
-4. In HA, confirm the BTHome device shows firmware version 20.0.0 and a
-   button press still fires exactly one event (version object absent
-   during the burst must not confuse the integration).
+4. In HA, confirm the sensor entities are unchanged (bthome-ble ignores
+   0xF2 for now, see caveat above) and a button press still fires exactly
+   one event (version object absent during the burst must not confuse
+   the integration).
 
 ## Button responsiveness options (V21 candidates, 2026-07-21)
 
