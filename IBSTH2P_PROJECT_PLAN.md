@@ -363,7 +363,36 @@ hardware-validated hexes).
   `bthome_phy6222/`) — verified to reproduce the hardware-proven
   `BOOT_IBSTH2P_v15_ota.bin` byte-for-byte.
 
-## V20: BTHome firmware version in the advertisement (pending hardware validation)
+## V20: BTHome firmware version + sleep-lock leak fix (pending hardware validation)
+
+### Fix: sleep lock leaked after supervision-timeout disconnects
+
+Present in V15..V19: `peripheralStateNotificationCB` released the
+`MOD_USR0` full-awake lock only in the `GAPROLE_WAITING` case (clean
+disconnect). A link that died by supervision timeout — client walked out
+of range, phone died, script killed without disconnecting — reports
+`GAPROLE_WAITING_AFTER_TIMEOUT` (`thb2_peripheral.c`, reason
+`LL_SUPERVISION_TIMEOUT_TERM`), and that case only logged. The SDK pwrmgr
+lock is a flag, not a refcount, so nothing else cleared it: the device
+resumed advertising and looked healthy while never sleeping again
+(~1-2 mA, 2xAAA dead in weeks) until the next *clean* connect/disconnect
+cycle or a battery pull. Trigger is the most natural phone workflow there
+is (connect with nRF Connect, walk away), so this may explain any
+disappointing battery observations on units that were connected to.
+
+V20 folds `GAPROLE_WAITING_AFTER_TIMEOUT` into the `GAPROLE_WAITING`
+cleanup (unlock, advert rebuild, latency/counter reset, `wrk.reboot`
+honored). The change is device-generic: on non-IBSTH2P builds the timeout
+path previously skipped all disconnect cleanup too (there it had no sleep
+lock to leak, but also never rebuilt the advert or honored the OTA reboot
+flag).
+
+Validation: connect (e.g. nRF Connect), then kill the link ungracefully —
+walk out of range or toggle the phone's Bluetooth off — wait ~4 s
+(supervision timeout), confirm advertising resumes, and check sleep
+current is back at the idle baseline rather than 1-2 mA.
+
+### Feature: BTHome firmware version in the advertisement
 
 The BTHome payload now ends with the firmware version object (id 0xF2,
 uint24, little-endian patch/minor/major), so the firmware level can be
@@ -486,8 +515,11 @@ the connection collapse into a single press event fired after disconnect.
 
 1. Measure battery behavior of V16+ (early UART sleep-release) against the
    V15 baseline over time.
-2. Consider a stuck-connection watchdog (a held BLE connection costs ~mA due
-   to the `MOD_USR0` full-awake lock) and a lower default TX power.
+2. Consider a stuck-connection watchdog (a *live but idle* connection still
+   costs ~mA due to the `MOD_USR0` full-awake lock; the related
+   supervision-timeout lock leak was fixed in V20) and a lower default TX
+   power. Also test whether the `MOD_USR0` lock is needed at all —
+   upstream pvvx sleeps through connections.
 3. Verify Home Assistant behavior (BTHome sensors + V17 button trigger)
    against the current build.
 4. Reintroduce useful code from `ibsth2p-current-experimental` in small,
