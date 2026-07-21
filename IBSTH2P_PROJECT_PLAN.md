@@ -363,6 +363,49 @@ hardware-validated hexes).
   `bthome_phy6222/`) — verified to reproduce the hardware-proven
   `BOOT_IBSTH2P_v15_ota.bin` byte-for-byte.
 
+## Button responsiveness options (V20 candidates, 2026-07-21)
+
+Background: the stock inter-chip frame carries no press counter — payload is
+fully decoded (see protocol section) and the main MCU is not field-updatable,
+so the latched level in payload `[7]` is all we get. A press is only detected
+when a grab window observes a level change, so today: up to ~5 min latency,
+and an even number of presses between two windows cancels out. The main MCU
+streams frames continuously (period: a few seconds, not precisely measured),
+so the loss window equals our observation gap — nothing inherent about 5 min.
+
+Note: `cfg.measure_interval`/`cfg.advertising_interval` are hard-pinned for
+IBSTH2P in `test_config()` (`config.c:167-168`), so every option below needs a
+new build; none are runtime-configurable today. V18's 60 s post-reset fast
+window is advertising-interval only — it does not extend UART listening
+(boot grab establishes the button baseline without firing, one extra grab
+lands ~45-50 s after boot while adv events are fast, then back to 5 min).
+
+Options, in descending preference:
+
+1. **Shrink the pinned `measure_interval`** (one line, `30` → e.g. `6` for
+   60 s windows). Latency ≤ 60 s; double press lost only if both land in the
+   same gap. With the V19 early release each window costs ~one frame period
+   awake, so ~5x today's grab duty — order of 50 uA average, still years on
+   2xAAA. Bonus: temp/humidity update every minute.
+2. **Wake-on-RX-line**: GPIO wake on P10 (UART RX idles high, toggles on any
+   traffic); the waking frame is lost mid-byte, but the next frame arrives
+   one period later. Near-frame-period press latency at roughly today's idle
+   cost (~20 ms awake per frame period). More code and sleep/re-init race
+   risk than option 1.
+3. **Always-on UART RX**: catches everything, but blocks sleep at 1-2 mA
+   continuous — battery dead in weeks. Rejected.
+
+Prerequisite experiment (cheap, do first): a debug build that holds the UART
+open for ~60 s and logs (a) the actual main-MCU frame period and (b) whether
+a button press emits an immediate extra frame (plausible — stock BLE toggle
+reacts promptly — but unverified). (a) fixes option 1's real cost and loss
+window; (b) decides whether option 2 is effectively lossless.
+
+Existing workaround, no new build: while a BLE connection is open, grabs run
+every 10 s (`GAPROLE_CONNECTED` path, `thb2_main.c:1106-1108`) — connecting
+with e.g. nRF Connect is an ad-hoc "live button mode", though presses during
+the connection collapse into a single press event fired after disconnect.
+
 ## Next Work
 
 1. Measure battery behavior of V16+ (early UART sleep-release) against the
@@ -373,6 +416,9 @@ hardware-validated hexes).
    against the current build.
 4. Reintroduce useful code from `ibsth2p-current-experimental` in small,
    validated slices.
+5. Button responsiveness (see "Button responsiveness options" above): run the
+   frame-period experiment, then pick option 1 (60 s windows) or 2
+   (wake-on-RX) for V20.
 
 ## Historical Note
 
