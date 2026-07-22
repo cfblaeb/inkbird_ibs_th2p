@@ -43,9 +43,11 @@ async def try_connect(addr):
 
 
 async def flash_one(addr, client, img):
-    rev = (await client.read_gatt_char(SW_REV_CHAR)).decode()
-    print(f"[{addr}] connected; current revision: {rev}", flush=True)
     try:
+        # Audit #40: the revision read must sit inside the try/finally —
+        # a GATT failure here used to leak the BLE connection.
+        rev = (await client.read_gatt_char(SW_REV_CHAR)).decode()
+        print(f"[{addr}] connected; current revision: {rev}", flush=True)
         await ns["flash"](client, img)
     finally:
         try:

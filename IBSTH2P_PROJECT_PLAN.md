@@ -682,6 +682,49 @@ worst case ~10.4 s. Option 1's loss window per grab gap is now exact:
 a 60 s `measure_interval` window misses a press pair only if both land
 in the same ~50 s gap; each grab costs ~one 10.4 s frame period awake.
 
+## V23: audit-fix batch (pending hardware validation)
+
+Output of the 2026-07-22 full-code audit (see AUDIT_FINDINGS.md for every
+finding and verdict). Changes, all compile-checked with the pinned
+toolchain and host-test suites green:
+
+- **Adv-restart bounce redesign** (findings #2/#4/#5): interval changes no
+  longer fake `GAPROLE_WAITING_AFTER_TIMEOUT`; a dedicated
+  `gapRole_AdvRestartReq` flag is consumed inside thb2_peripheral.c's
+  END_DISCOVERABLE_DONE handler with no app notification, and a connection
+  that wins the race simply cancels the restart. The V21
+  `adv_restart_pending` counter is gone; WAITING_AFTER_TIMEOUT again means
+  only a real supervision timeout.
+- **No more permanent-dark dead-ends** (#9/#45): failed GAP_MakeDiscoverable
+  retries in 1 s; failed link establishments restart advertising.
+- **low_vbat removed** (#3): the 60-min hibernate actually woke every 16 s
+  (24-bit RTC comparator overflow); owner decision — run until the battery
+  dies.
+- **SERVICE_KEY removed** (#8): placeholder pin P07 is no longer an
+  interrupt + wake source.
+- **DEVID reply fix** (#6) and UTC delta arithmetic (#30).
+- **Fleet tooling** (#17/#18/#40): stale-PPlusOTA advertisers excluded as
+  flash targets, identity snapshot seeded from fleet_flash_mapping.jsonl and
+  lengthened to 25 s, connection leak fixed.
+
+Artifacts (V22 set retained as validated fallback):
+`inkbird_fw/BOOT_IBSTH2P_v23.hex` / `BOOT_IBSTH2P_v23_ota.bin` /
+`STAGE3_IBSTH2P_v23_stock_bundle_installer.hex16` (+ payload).
+
+Validation steps:
+1. Flash one unit (pvvx path). Confirm `IBS-V23`, BTHome data flowing.
+2. Interval-change stress: battery-pull, connect during the fast window,
+   stay connected past the 60 s expiry — measurements must keep arriving
+   every ~10 s during the connection (the old race killed them), then
+   disconnect and confirm 10 s advertising resumes.
+3. Supervision-timeout check (V20 regression class): connect, toggle
+   phone BT off, wait ~4 s; confirm advertising resumes AND sleep current
+   returns to baseline.
+4. Connect/disconnect cycling (10x) — no stuck advertising, no fast-adv
+   storm (the V21 fix's regression class).
+5. Fleet-flash one stock unit with the updated fleet_flash_stock.py and
+   verify the mapping line pairs the right addresses.
+
 ## Button responsiveness options (V21 candidates, 2026-07-21)
 
 Background: the stock inter-chip frame carries no press counter — payload is

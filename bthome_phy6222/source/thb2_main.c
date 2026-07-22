@@ -204,27 +204,28 @@ extern gapPeriConnectParams_t periConnParameters;
 extern uint16_t gapParameters[];
 static void set_adv_interval(uint16_t advInt);
 
-// Nonzero while an advertising restart from set_new_adv_interval() is in
-// flight. That function borrows GAPROLE_WAITING_AFTER_TIMEOUT as the SDK's
-// auto-re-advertise token (see GAP_END_DISCOVERABLE_DONE_EVENT in
-// thb2_peripheral.c), so the app state callback receives a fake
-// "supervision timeout" notification on every interval change. The V20
-// disconnect cleanup running on that fake notification re-armed
-// adv_reload_count and looped set_new_adv_interval() on every advertising
-// event — a teardown/restart storm at the minimum advertising interval
-// (~200 pkt/s, 7-8 mA). The counter lets the callback tell the bounce
-// apart from a real supervision timeout.
-static volatile uint8_t adv_restart_pending;
-
-// Set new advertising interval
+// Set new advertising interval (V23 redesign, audit findings #2/#4/#5).
+// The V21 protocol faked gapRole_state = GAPROLE_WAITING_AFTER_TIMEOUT and
+// counted the bounce in adv_restart_pending — non-atomic bookkeeping that
+// raced real GAP events: a connection winning the race against
+// END_DISCOVERABLE_DONE ran the full disconnect cleanup mid-connection,
+// and a failed EndDiscoverable stranded the counter, eating the next real
+// supervision timeout (sleep-lock leak). Now the restart request is a
+// dedicated flag owned by thb2_peripheral.c and consumed inside its
+// GAP_END_DISCOVERABLE_DONE handler: no fake states, no app notification,
+// and a connection that wins the race simply cancels the restart (the
+// disconnect path re-advertises with the new parameters anyway).
 static void set_new_adv_interval(uint16_t advInt)
 {
 	set_adv_interval(advInt);
-	adv_restart_pending++;
-	GAP_EndDiscoverable( gapRole_TaskID );
-	gapRole_state = GAPROLE_WAITING_AFTER_TIMEOUT;
-	// Turn advertising back on.
-	osal_set_event( gapRole_TaskID, START_ADVERTISING_EVT );
+	gapRole_AdvRestartReq = TRUE;
+	if (GAP_EndDiscoverable( gapRole_TaskID ) != SUCCESS) {
+		// Not advertising (or GAP busy): no END_DONE will arrive, so do
+		// not leave the request armed for some unrelated future
+		// completion. The new parameters still take effect on the next
+		// advertising start.
+		gapRole_AdvRestartReq = FALSE;
+	}
 }
 // Set advertising interval
 static void set_adv_interval(uint16_t advInt)
@@ -1137,10 +1138,6 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 			adv_wrk.adv_event = 0;
 			adv_wrk.meas_count = 0;
 			adv_wrk.adv_reload_count = 1;
-			// A connection ends any in-flight advertising restart; drop the
-			// pending marker so a later real supervision timeout is not
-			// mistaken for a set_new_adv_interval() bounce.
-			adv_restart_pending = 0;
 #if DEVICE == DEVICE_IBSTH2P
 			// Prevent sleep during BLE connection — needed for stable conn events
 			hal_pwrmgr_lock(MOD_USR0);
@@ -1170,18 +1167,12 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 		break;
 
 		case GAPROLE_WAITING_AFTER_TIMEOUT:
-			// This state arrives two ways: a real supervision timeout
-			// (client walked out of range, died, or was killed without
-			// disconnecting), or the fake-state bounce set_new_adv_interval()
-			// uses to restart advertising with new parameters. Only the
-			// real timeout may run the disconnect cleanup below — cleanup on
-			// the bounce re-arms adv_reload_count and loops into the V20
-			// advertising storm (see adv_restart_pending above).
-			if (adv_restart_pending) {
-				adv_restart_pending--;
-				break;
-			}
-			// Real supervision timeout: needs the same cleanup as a clean
+			// V23: with the set_new_adv_interval() fake-state bounce gone
+			// (interval restarts are handled entirely inside
+			// thb2_peripheral.c via gapRole_AdvRestartReq), this state again
+			// means exactly one thing: a real supervision timeout (client
+			// walked out of range, died, or was killed without
+			// disconnecting). It needs the same cleanup as a clean
 			// disconnect, most critically the MOD_USR0 unlock — before V20
 			// this path leaked the sleep lock, leaving the chip fully awake
 			// (~1-2 mA) until the next clean connect/disconnect cycle or a

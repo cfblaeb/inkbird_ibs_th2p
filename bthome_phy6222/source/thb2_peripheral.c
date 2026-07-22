@@ -93,6 +93,18 @@ static uint32 gapRole_signCounter;
 static uint8  gapRole_bdAddr[B_ADDR_LEN];
 uint8  gapRole_AdvEnabled = FALSE;
 
+// V23: set (with GAP_EndDiscoverable) by set_new_adv_interval() in
+// thb2_main.c to request an advertising restart with new parameters.
+// Consumed by GAP_END_DISCOVERABLE_DONE_EVENT below: restart advertising
+// without touching gapRole_state or notifying the app. This replaces the
+// V21 protocol of faking gapRole_state = GAPROLE_WAITING_AFTER_TIMEOUT
+// plus an adv_restart_pending counter in the app, which raced real GAP
+// events (audit findings #2/#4/#5): a connection winning the race against
+// END_DISCOVERABLE_DONE ran the full disconnect cleanup mid-connection,
+// and a failed EndDiscoverable stranded the counter, re-opening the V20
+// sleep-lock leak on the next real supervision timeout.
+uint8  gapRole_AdvRestartReq = FALSE;
+
 uint16 gapRole_AdvertOffTime = 0; // DEFAULT_ADVERT_OFF_TIME;
 uint8  gapRole_AdvertDataLen = 3;
 uint8  gapRole_AdvertData[B_MAX_ADV_LEN] =
@@ -814,6 +826,13 @@ uint16 GAPRole_ProcessEvent( uint8 task_id, uint16 events )
 			{
 				gapRole_state = GAPROLE_ERROR;
 
+				// V23 (audit #9): a transient rejection here used to be a
+				// dead-end — nothing ever retried, and a headless sensor
+				// stayed dark until a battery pull. Retry in 1 s;
+				// gapRole_AdvEnabled is still TRUE so the retry re-attempts
+				// with identical parameters.
+				VOID osal_start_timerEx( gapRole_TaskID, START_ADVERTISING_EVT, 1000 );
+
 				// Notify the application with the new state change
 				if ( pGapRoles_AppCGs && pGapRoles_AppCGs->pfnStateChange )
 				{
@@ -1108,6 +1127,27 @@ static void gapRole_ProcessGAPMsg( gapEventHdr_t* pMsg )
 			}
 			else // GAP_END_DISCOVERABLE_DONE_EVENT
 			{
+				// V23: an interval-change restart requested by
+				// set_new_adv_interval() completes here. Consume the request
+				// without touching gapRole_state or notifying the app — the
+				// role is still logically "advertising", just re-arming with
+				// new parameters. If a connection won the race against this
+				// completion (state already CONNECTED), drop the request:
+				// the disconnect path restarts advertising with the new
+				// parameters anyway, and nonconn-advertising into a live
+				// connection is never what the interval change wanted.
+				if ( gapRole_AdvRestartReq )
+				{
+					gapRole_AdvRestartReq = FALSE;
+					if ( gapRole_state != GAPROLE_CONNECTED
+							&& gapRole_state != GAPROLE_CONNECTED_ADV )
+					{
+						gapRole_AdvEnabled = TRUE;
+						VOID osal_set_event( gapRole_TaskID, START_ADVERTISING_EVT );
+					}
+					break; // out of the switch: no state change, no app notification
+				}
+
 				if ( gapRole_AdvertOffTime != 0 )
 				{
 					if ( ( gapRole_AdvEnabled ) )
@@ -1146,6 +1186,9 @@ static void gapRole_ProcessGAPMsg( gapEventHdr_t* pMsg )
 		}
 		else
 		{
+			// V23: never leave a restart request stranded on a failed
+			// end/make-discoverable — that was audit finding #5's leak path.
+			gapRole_AdvRestartReq = FALSE;
 			gapRole_state = GAPROLE_ERROR;
 		}
 
@@ -1199,15 +1242,20 @@ static void gapRole_ProcessGAPMsg( gapEventHdr_t* pMsg )
 		}
 		else if ( pPkt->hdr.status == bleGAPConnNotAcceptable )
 		{
-			// Set enabler to FALSE; device will become discoverable again when
-			// this value gets set to TRUE
-			gapRole_AdvEnabled = FALSE;
-			// Go to WAITING state, and then start advertising
+			// V23 (audit #45): actually restart advertising instead of
+			// waiting for an app re-enable that never comes on a headless
+			// sensor.
+			gapRole_AdvEnabled = TRUE;
 			gapRole_state = GAPROLE_WAITING;
+			VOID osal_set_event( gapRole_TaskID, START_ADVERTISING_EVT );
 		}
 		else
 		{
+			// V23 (audit #45): same reasoning — never strand advertising
+			// off after a failed link establishment.
 			gapRole_state = GAPROLE_ERROR;
+			gapRole_AdvEnabled = TRUE;
+			VOID osal_start_timerEx( gapRole_TaskID, START_ADVERTISING_EVT, 1000 );
 		}
 
 		notify = TRUE;

@@ -1,5 +1,16 @@
 # Code Audit Findings — 2026-07-22
 
+**Resolution summary (V23, pending hardware validation):** fixed in V23 —
+the #2/#4/#5 adv-restart bounce redesign (dedicated `gapRole_AdvRestartReq`
+flag consumed inside thb2_peripheral.c; no more fake GAP states), #9/#45
+retry-after-GAP-failure (1 s retry timer; advertising can no longer strand
+permanently dark), #6 DEVID pointer fix, #30/#29 UTC delta arithmetic, and
+fleet tooling #17 (stale-PPlusOTA exclusion), #18 (mapping-seeded 25 s
+snapshot), #40 (connection leak). Fixed earlier on this branch: #3/#7/#14
+(low_vbat removed), #8/#25/#35/#36 (SERVICE_KEY removed). Won't-fix:
+#1/#10/#12/#20/#31/#42 (unreachable on this device). Everything else LOW/
+cosmetic or refuted — see individual entries.
+
 Output of a 9-lens multi-agent audit of the custom firmware (master @ V22,
 `d043da3`) plus the fleet tooling. **Every entry below is a raw finder claim,
 unverified unless its Status line says otherwise.** Verification protocol per
@@ -54,7 +65,7 @@ In pack_cfg_fmem() the destination pointer is set once (`wraddr = fnewseg + 4;`,
 
 ### 2. [MEDIUM] `bthome_phy6222/SDK/components/driver/uart/uart.c:278` — UART init with tx_pin=GPIO_DUMMY writes OOB garbage into AON PMCTL0 on every wakeup
 
-*Status: **CONFIRMED** (code trace, V22) — one defect complex with #4 and #5.*
+*Status: **FIXED in V23.** **CONFIRMED** (code trace, V22) — one defect complex with #4 and #5.*
 
 Verified trace: `set_new_adv_interval()` (thb2_main.c:220) is a non-atomic
 "bounce": it queues `GAP_EndDiscoverable`, then directly fakes
@@ -152,7 +163,7 @@ low_vbat() calls hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15) = 117,964,800 tic
 
 ### 4. [MEDIUM] `bthome_phy6222/source/battery.c:183` — low_vbat 60-minute sleep wraps 24-bit RTC: wakes after ~16 s, not 1 hour
 
-*Status: **CONFIRMED** (code trace, V22) — same complex — see #2 for the verified trace and proposed fix (case 1).*
+*Status: **FIXED in V23.** **CONFIRMED** (code trace, V22) — same complex — see #2 for the verified trace and proposed fix (case 1).*
 
 low_vbat() calls hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15) = 117,964,800 ticks, but the PHY6222 RTC counter/comparator is 24-bit (wraps at 16,777,216 ticks = 512 s). config_RTC1 (SDK/lib/rf/patch.c:5609) programs AP_AON->RTCCC0 = sleep_tick + time; only the low 24 bits are meaningful, and 117,964,800 mod 2^24 = 524,288 ticks = 16.0 s. It also enables the counter-overflow wake event (RTCCTL BIT(18)), so even under the alternative 32-bit-compare interpretation the chip wakes at the first RTC wrap (<=512 s). Either way the intended 1-hour low-battery standby is impossible.
 
@@ -160,7 +171,7 @@ low_vbat() calls hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15) = 117,964,800 tic
 
 ### 5. [MEDIUM] `bthome_phy6222/source/battery.c:183` — low_vbat 60-min hibernate truncates to ~16 s in 24-bit RTC comparator: brownout boot-loop
 
-*Status: **CONFIRMED** (code trace, V22) — same complex — see #2 for the verified trace and proposed fix (case 2, stranded marker).*
+*Status: **FIXED in V23.** **CONFIRMED** (code trace, V22) — same complex — see #2 for the verified trace and proposed fix (case 2, stranded marker).*
 
 low_vbat() calls hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15) = 117,964,800 ticks intending a 60-minute sleep. hal_pwrmgr_enter_sleep_rtc_reset (SDK pwrmgr.c:471-487) passes this to config_RTC1, which writes AP_AON->RTCCC0 = sleep_tick + time (SDK/lib/rf/patch.c:5609). The RTC counter/comparator is 24-bit (wraps every 512 s), so the effective delta is 117,964,800 mod 2^24 = 524,288 ticks = 16 s. check_battery() (battery.c:190-192, the OTA_TYPE_BOOT branch in the shipped image) invokes low_vbat whenever a measurement reads < 2000 mV.
 
@@ -168,7 +179,7 @@ low_vbat() calls hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15) = 117,964,800 tic
 
 ### 6. [MEDIUM] `bthome_phy6222/source/ble_ota.c:157` — OTA bound uses 2 MB FLASH_MAX_SIZE on 512 KB part; wraps over EEP banks and firmware
 
-*Status: **CONFIRMED (source) / defanged in shipped binaries** — severity downgraded to LOW.*
+*Status: **FIXED in V23.** **CONFIRMED (source) / defanged in shipped binaries** — severity downgraded to LOW.*
 
 Verified: cmd_parser.c:1026 really does take `(dev_id_t *)&obuf` — the
 address of the pointer *parameter*, not the buffer — and writes
@@ -247,7 +258,7 @@ In the CMD_ID_DEVID handler, after `memcpy(obuf, &dev_id, sizeof(dev_id))` the c
 
 ### 9. [MEDIUM] `bthome_phy6222/source/flash_eep.c:340` — Object header committed before data, no CRC: torn write reads back as valid record
 
-*Status: **CONFIRMED** (code trace, V22).*
+*Status: **FIXED in V23.** **CONFIRMED** (code trace, V22).*
 
 Verified: on `START_ADVERTISING_EVT`, a non-SUCCESS return from
 `GAP_MakeDiscoverable` (thb2_peripheral.c:811-815) parks the role in
@@ -381,7 +392,7 @@ adv_restart_pending is incremented unconditionally in set_new_adv_interval() (li
 
 ### 15. [MEDIUM] `bthome_phy6222/source/thb2_peripheral.c:815` — One failed GAP_MakeDiscoverable permanently kills advertising (GAPROLE_ERROR dead-end)
 
-*Status: **CONFIRMED — duplicate of #9** (MakeDiscoverable dead-end); fix is the #9 retry timer.*
+*Status: **FIXED in V23.** **CONFIRMED — duplicate of #9** (MakeDiscoverable dead-end); fix is the #9 retry timer.*
 
 START_ADVERTISING_EVT (thb2_peripheral.c:811-822) sets gapRole_state = GAPROLE_ERROR if GAP_MakeDiscoverable() returns non-SUCCESS, and the app callback's GAPROLE_ERROR case (thb2_main.c:1216-1218) only logs. Nothing ever re-posts START_ADVERTISING_EVT after ERROR: adv_measure() stops running (no more ADV_BROADCAST_EVT), gatrole_advert_enable(TRUE) is only reachable from GAPROLE_STARTED, and the 32 s watchdog (main.c:589) never fires because the OSAL loop still runs. GAP_MakeDiscoverable does an osal_mem_alloc(sizeof(gapAdvertState_t)) (SDK gap_peridevmgr.c:138) and issues HCI adv-param/enable commands; any single transient failure (heap pressure right after a disconnect while ATT/L2CAP buffers are in flight, or an HCI error) is permanent. The same dead-end exists via GAP_END_DISCOVERABLE_DONE with failure status (thb2_peripheral.c:1147-1150). MakeDiscoverable runs at least twice per connection cycle (post-disconnect restart + the reload-count interval bounce) and once per boot-window expiry, so the failure point is exercised constantly over fleet lifetime.
 
@@ -389,7 +400,7 @@ START_ADVERTISING_EVT (thb2_peripheral.c:811-822) sets gapRole_state = GAPROLE_E
 
 ### 16. [MEDIUM] `bthome_phy6222/source/thb2_peripheral.c:1143` — END_DISCOVERABLE_DONE racing an incoming connection runs disconnect cleanup mid-connection
 
-*Status: **CONFIRMED — duplicate of #2** (END_DISCOVERABLE bounce race); fixed by the #2 redesign.*
+*Status: **FIXED in V23.** **CONFIRMED — duplicate of #2** (END_DISCOVERABLE bounce race); fixed by the #2 redesign.*
 
 set_new_adv_interval() (thb2_main.c:220) issues GAP_EndDiscoverable and fakes gapRole_state=GAPROLE_WAITING_AFTER_TIMEOUT. If a CONNECT_IND lands in the same advertising event (exactly the V18 fast-window use case: user connects as the 60 s window expires and the interval-restore bounce fires), GAP_LINK_ESTABLISHED_EVENT can be processed before the END_DISCOVERABLE_DONE_EVENT. The connected callback clears adv_restart_pending (thb2_main.c:1143) and locks MOD_USR0; then the late END_DONE handler sees state==GAPROLE_CONNECTED, falls into the else branch at thb2_peripheral.c:1143 setting gapRole_state=GAPROLE_WAITING and notifies the app, whose GAPROLE_WAITING case (thb2_main.c:1190-1213) stops TIMER_BATT_EVT, unlocks MOD_USR0, and honors wrk.reboot — all during a live connection. The V21 adv_restart_pending counter cannot guard this because the notification arrives as GAPROLE_WAITING, not GAPROLE_WAITING_AFTER_TIMEOUT.
 
@@ -397,7 +408,7 @@ set_new_adv_interval() (thb2_main.c:220) issues GAP_EndDiscoverable and fakes ga
 
 ### 17. [MEDIUM] `fleet_flash_stock.py:129` — Stock flasher targets any 'PPlusOTA' advertiser, not the device it mode-switched
 
-*Status: **CONFIRMED — MEDIUM (tooling, operationally real)**: verified against fleet_flash_stock.py:128-132 — find_device latches the first advertiser whose name starts with 'PPlusOTA', with no tie to the mode-switched address, and the pre-reboot write exception is swallowed (117-118). A unit left in OTA mode by an aborted run, or a concurrent flash in the same room, gets flashed instead and the stock->new mapping is recorded wrong. Real risk during actual fleet flashing. Fix candidates: (a) after mode_switch, prefer the advertiser at the documented stock+1 address / correlate by MAC proximity; (b) fail loudly instead of swallowing the write exception; (c) flash strictly one unit at a time and require the operator to confirm no stale PPlusOTA advertisers first.*
+*Status: **FIXED in V23.** **CONFIRMED — MEDIUM (tooling, operationally real)**: verified against fleet_flash_stock.py:128-132 — find_device latches the first advertiser whose name starts with 'PPlusOTA', with no tie to the mode-switched address, and the pre-reboot write exception is swallowed (117-118). A unit left in OTA mode by an aborted run, or a concurrent flash in the same room, gets flashed instead and the stock->new mapping is recorded wrong. Real risk during actual fleet flashing. Fix candidates: (a) after mode_switch, prefer the advertiser at the documented stock+1 address / correlate by MAC proximity; (b) fail loudly instead of swallowing the write exception; (c) flash strictly one unit at a time and require the operator to confirm no stale PPlusOTA advertisers first.*
 
 After sending mode-switch 0x0102 to the given stock address, mode_switch() scans 30 s for the first advertiser whose name starts with 'PPlusOTA' and uploads the STAGE3 bundle to it. The documented address relationship (stock-address+1) is never checked, and the write exception before the reboot is swallowed unconditionally (line 117-118), so the scan can latch a different unit: one left in PPlusOTA mode by an earlier aborted run, or a second unit being flashed concurrently in the same rooms. The intended device may not even have rebooted. The wrong unit gets reflashed and the subsequent stock->new mapping line pairs the CLI stock address with an unrelated new 38:1F:8D address.
 
@@ -405,7 +416,7 @@ After sending mode-switch 0x0102 to the given stock address, mode_switch() scans
 
 ### 18. [MEDIUM] `fleet_flash_stock.py:243` — 10 s pre-flash snapshot can miss existing custom units, corrupting the identity mapping
 
-*Status: **CONFIRMED — MEDIUM (tooling, operationally real)**: verified — `known` is built from a single 10 s passive scan (fleet_flash_stock.py:242-243) at the fleet's 10 s advertising cadence, so lossy BLE reception can miss an already-deployed custom unit, and watch_new_custom then misattributes that unit as the just-flashed device, corrupting fleet_flash_mapping.jsonl. Real during multi-unit sessions. Fix candidates: lengthen/repeat the snapshot to several advertising intervals; confirm the new device by a property tied to the flash (e.g. the specific new MAC derived from the stock unit, or a fresh boot/uptime signal) rather than 'first unfamiliar 38:1F:8D advertiser'.*
+*Status: **FIXED in V23.** **CONFIRMED — MEDIUM (tooling, operationally real)**: verified — `known` is built from a single 10 s passive scan (fleet_flash_stock.py:242-243) at the fleet's 10 s advertising cadence, so lossy BLE reception can miss an already-deployed custom unit, and watch_new_custom then misattributes that unit as the just-flashed device, corrupting fleet_flash_mapping.jsonl. Real during multi-unit sessions. Fix candidates: lengthen/repeat the snapshot to several advertising intervals; confirm the new device by a property tied to the flash (e.g. the specific new MAC derived from the stock unit, or a fresh boot/uptime signal) rather than 'first unfamiliar 38:1F:8D advertiser'.*
 
 watch_new_custom() attributes the first 38:1F:8D:* BTHome advertiser not in `known` to the just-flashed device. `known` is built from a single 10 s passive scan (line 242-243) — exactly one advertising interval of the V19+/V22 fleet (10 s cadence). BLE advertisement reception is lossy, so with ~11 other custom units already deployed in adjacent rooms, missing at least one unit's single advert in that window is realistic. A missed unit advertising during the watch phase (its next beacon is <=10 s away, while the flashed device still has to run the SRAM installer and reboot) is then recorded as the flashed device's new identity.
 
@@ -493,7 +504,7 @@ CMD_ID_I2C_SCAN op 0/1 serialize ucap.total_bytes (4 separate volatile byte read
 
 ### 29. [LOW] `bthome_phy6222/source/config.c:80` — get_utc_time_sec uses raw single RTCCNT read and off-by-one wrap arithmetic
 
-*Status: **CONFIRMED — LOW/cosmetic (clock cluster, see #30)**: raw single RTCCNT read; part of the same off-by-one wrap handling as #30.*
+*Status: **FIXED in V23.** **CONFIRMED — LOW/cosmetic (clock cluster, see #30)**: raw single RTCCNT read; part of the same off-by-one wrap handling as #30.*
 
 The compiled variant of get_utc_time_sec reads AP_AON->RTCCNT once (config.c:80, TEST_RTC_DELTA off), although this RTC register needs the double-read pattern — the V21 code itself documents and uses it in ucap_rtc (cmd_parser.c:92-98, 'same double-read pattern as the reference'). A metastable read near a multi-bit carry returns a bogus value; the subsequent delta is clamped only to 64 s (delta &= 0x1fffff, config.c:87), so one bad read can inject up to ~64 s into clkt.utc_time_sec and desynchronize clkt.utc_time_tik for a cycle. Additionally the wrap branch 'delta = 0xffffffff - clkt.utc_time_tik + new_time_tik' (config.c:85) loses one tick per call (24-bit wrap should be 0x1000000-based), a small systematic skew at the 10 s call cadence.
 
@@ -501,7 +512,7 @@ The compiled variant of get_utc_time_sec reads AP_AON->RTCCNT once (config.c:80,
 
 ### 30. [LOW] `bthome_phy6222/source/config.c:82` — get_utc_time_sec wrap branch inverted: normal path computes delta-1 tick
 
-*Status: **CONFIRMED — LOW/cosmetic**: the wrap branches in get_utc_time_sec are inverted — unsigned subtraction already handles wrap, so the taken (normal, new>old) branch computes delta-1, losing ~1 tick (~30 us) per call (~every 10 s => a few ppm slow). The UTC clock is barely used on this device (no history service shipped; only surfaced in the connected CMD_ID_MEASURE reply), so impact is negligible. Cheap one-line fix (`delta = new - old;` unconditionally) if the clock ever matters.*
+*Status: **FIXED in V23.** **CONFIRMED — LOW/cosmetic**: the wrap branches in get_utc_time_sec are inverted — unsigned subtraction already handles wrap, so the taken (normal, new>old) branch computes delta-1, losing ~1 tick (~30 us) per call (~every 10 s => a few ppm slow). The UTC clock is barely used on this device (no history service shipped; only surfaced in the connected CMD_ID_MEASURE reply), so impact is negligible. Cheap one-line fix (`delta = new - old;` unconditionally) if the clock ever matters.*
 
 The code takes `delta = new - old` when new <= old (the wrap case) and `delta = 0xffffffff - old + new` when new > old (the normal case). Modulo-2^32 arithmetic makes both branches nearly equivalent, but the normal-path expression equals (new - old - 1) mod 2^32, so every call undercounts elapsed time by exactly one 32768 Hz tick (30.5 us). The subsequent `delta &= 0x1fffff` hides the mistake for the wrap case (2^24 is a multiple of 2^21) but not the systematic -1.
 
@@ -581,7 +592,7 @@ The GAPROLE_WAITING / real-timeout cleanup calls bthome_data_beacon((void*)gapRo
 
 ### 40. [LOW] `fleet_flash_custom_any.py:46` — GATT read before try/finally leaks the BLE connection on failure
 
-*Status: **CONFIRMED — LOW (tooling)**: a GATT read before the try/finally in fleet_flash_custom_any.py can leak the BLE connection on failure. Cosmetic (process exits anyway); tidy when touching the fleet scripts.*
+*Status: **FIXED in V23.** **CONFIRMED — LOW (tooling)**: a GATT read before the try/finally in fleet_flash_custom_any.py can leak the BLE connection on failure. Cosmetic (process exits anyway); tidy when touching the fleet scripts.*
 
 In flash_one(), the initial read_gatt_char(SW_REV_CHAR) at line 46 sits outside the try/finally that guarantees client.disconnect(). If the read raises while the link is still up (ATT error, timeout with connection intact), the exception propagates to main()'s except handler which just prints FAILED and continues the round-robin — the BleakClient is never disconnected. The zombie connection keeps the target device connected (its fast window consumed), so subsequent try_connect() attempts to it fail until the script is restarted or BlueZ drops the link. Contrast fleet_flash_custom.py, which correctly wraps the same read in try/finally.
 
@@ -605,7 +616,7 @@ pack_cfg_fmem() returns unsigned int but signals errors as -(FMEM_OVR_ERR) = 0xF
 
 ### 43. [LOW] `bthome_phy6222/source/thb2_main.c:438` — KEY event during a connection leaks adv_restart_pending, re-enabling the sleep-lock leak
 
-*Status: **CONFIRMED — duplicate of #5**, now moot: the KEY path that stranded adv_restart_pending is gone with SERVICE_KEY (#8 fix). The underlying bounce fragility is still addressed by the #2 redesign.**not in shipped build***
+*Status: **FIXED in V23.** **CONFIRMED — duplicate of #5**, now moot: the KEY path that stranded adv_restart_pending is gone with SERVICE_KEY (#8 fix). The underlying bounce fragility is still addressed by the #2 redesign.**not in shipped build***
 
 The shipped build includes SERVICE_KEY with GPIO_KEY = P07, a self-described placeholder pin ('Not really. Just a placeholder.', config.h:219) whose edge interrupts are registered at init. A key-up while a connection is live (gapRole_AdvEnabled stays TRUE across connections) calls increase_advertising_frequency() -> set_new_adv_interval(), which increments the new V21 adv_restart_pending counter and calls GAP_EndDiscoverable while not advertising — so no END_DISCOVERABLE_DONE bounce notification ever arrives to decrement it — and also overwrites gapRole_state from GAPROLE_CONNECTED to GAPROLE_WAITING_AFTER_TIMEOUT mid-connection (pre-existing). With pending stuck >0, the next real supervision timeout takes the 'bounce' early-break in peripheralStateNotificationCB: MOD_USR0 is never unlocked (the V15-V19 ~1-2 mA leak returns), the advertisement is not rebuilt, and wrk.reboot is not honored, until a later clean connect/disconnect cycle. Note adv_restart_pending is cleared on GAPROLE_CONNECTED, but that cannot help once the leak happens inside the same connection.
 
@@ -621,7 +632,7 @@ GAPROLE_CONNECTED (line 1153) calls ucap_start_grab(), which locks MOD_UART0 and
 
 ### 45. [LOW] `bthome_phy6222/source/thb2_peripheral.c:1200` — Failed GAP_LINK_ESTABLISHED statuses strand advertising off with no re-enable
 
-*Status: **CONFIRMED — related to #9**: a failed GAP_LINK_ESTABLISHED status can leave advertising off with no re-enable — the same 'no retry after a GAP failure' family as #9; the #9 retry-timer approach covers it.**not in shipped build***
+*Status: **FIXED in V23.** **CONFIRMED — related to #9**: a failed GAP_LINK_ESTABLISHED status can leave advertising off with no re-enable — the same 'no retry after a GAP failure' family as #9; the #9 retry-timer approach covers it.**not in shipped build***
 
 In gapRole_ProcessGAPMsg, GAP_LINK_ESTABLISHED_EVENT with status bleGAPConnNotAcceptable sets gapRole_AdvEnabled = FALSE and gapRole_state = GAPROLE_WAITING (thb2_peripheral.c:1200-1207) with a comment saying the device becomes discoverable again 'when this value gets set to TRUE' — but no code in this app ever sets it TRUE again (the TI-style GAPRole_SetParameter path is compiled out under #if 0, and the app's WAITING cleanup does not re-enable advertising). Any other failure status falls to gapRole_state = GAPROLE_ERROR (lines 1208-1211), the same unrecoverable dead-end as the GAPROLE_ERROR finding. Either way advertising is permanently off with no link established to recover through.
 

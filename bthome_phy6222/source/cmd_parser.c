@@ -1023,7 +1023,11 @@ int cmd_parser(uint8_t * obuf, uint8_t * ibuf, uint32_t len) {
 		if (cmd == CMD_ID_DEVID) { // Get DEV_ID
 			memcpy(obuf, &dev_id, sizeof(dev_id));
 #if (DEV_SERVICES & SERVICE_THS)
-			dev_id_t * p = (dev_id_t *)&obuf;
+			// V23 (audit #6): was (dev_id_t *)&obuf — the address of the
+			// pointer variable, a UB store the optimizer happened to delete
+			// in all shipped builds, so dev_spec_data never actually carried
+			// the sensor type. Now writes into the reply as intended.
+			dev_id_t * p = (dev_id_t *)obuf;
 			p->dev_spec_data = thsensor_cfg.sensor_type;
 #endif
 			olen = sizeof(dev_id);
