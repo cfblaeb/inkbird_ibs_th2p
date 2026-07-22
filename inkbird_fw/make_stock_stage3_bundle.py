@@ -43,7 +43,7 @@ DEFAULT_STOCK_HEX = HERE / "ibs_thx_b_2p7_48M_phy6222.hex16"
 DEFAULT_INSTALLER_HEX = HERE / "build" / "stock_bundle_installer" / "STOCK_BUNDLE_INSTALLER.hex"
 # Default to the current hardware-validated image. Callers can still override this
 # with --final-hex when testing a fresh source build.
-DEFAULT_FINAL_HEX = HERE / "BOOT_IBSTH2P_v21.hex"
+DEFAULT_FINAL_HEX = HERE / "BOOT_IBSTH2P_v22.hex"
 DEFAULT_OUTPUT_HEX = HERE / "STAGE3_IBSTH2P_stock_bundle_installer.hex16"
 DEFAULT_PAYLOAD_BIN = HERE / "STAGE3_IBSTH2P_stock_bundle_payload.bin"
 
