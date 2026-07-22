@@ -237,7 +237,30 @@ In the CMD_ID_DEVID handler, after `memcpy(obuf, &dev_id, sizeof(dev_id))` the c
 
 ### 9. [MEDIUM] `bthome_phy6222/source/flash_eep.c:340` — Object header committed before data, no CRC: torn write reads back as valid record
 
-*Status: unverified · Reachability: shipped build*
+*Status: **CONFIRMED** (code trace, V22).*
+
+Verified: on `START_ADVERTISING_EVT`, a non-SUCCESS return from
+`GAP_MakeDiscoverable` (thb2_peripheral.c:811-815) parks the role in
+GAPROLE_ERROR and notifies the app, whose ERROR case only logs. There is no
+retry anywhere: no timer is armed, `gapRole_AdvEnabled` stays TRUE so the
+enable path's FALSE->TRUE edge filter makes re-enabling a no-op, and every
+other advertising restart source is unreachable — `adv_measure()` is driven
+by advertising events (which no longer occur), and the disconnect restart
+path requires a connection (impossible while not advertising). One failed
+MakeDiscoverable while disconnected = silent, permanently dark device until
+battery pull: no BTHome data, not connectable.
+
+Trigger probability: low but real, and coupled to the #2 bounce complex —
+the ordering where END_DISCOVERABLE_DONE is processed first re-arms
+advertising via START_ADVERTISING_EVT while a CONNECT_IND is in flight,
+which is exactly the wrong-LL-state window where MakeDiscoverable can
+reject. GAP-layer allocation failure is the other candidate cause.
+
+Fix candidate (bundle with the #2 redesign): in the failure branch,
+schedule a retry — `osal_start_timerEx(gapRole_TaskID,
+START_ADVERTISING_EVT, 1000)` — keeping the ERROR notification for
+visibility. Self-healing regardless of root cause; a device that can
+retry every second is never permanently dark from a transient rejection.*
 
 _flash_write_cfg() writes the 4-byte header {size,id} first (line 340) and the payload afterwards (line 344), and records carry no CRC or completion marker. Power loss between the two writes (or mid-payload) leaves a record whose header is fully valid but whose data is 0xFF/partial. flash_read_cfg() has no way to detect this and returns the garbage as the stored object. Because the record matches on id and size, it also shadows the previous good copy of the same object (get_addr_fobj returns the LAST record for an id).
 
