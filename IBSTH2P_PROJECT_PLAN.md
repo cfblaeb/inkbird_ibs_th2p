@@ -603,6 +603,21 @@ V21's hardware-validated behavior unchanged.
 Artifacts: `inkbird_fw/BOOT_IBSTH2P_v22.hex` / `..._ota.bin` /
 `STAGE3_IBSTH2P_v22_stock_bundle_*` (pinned toolchain, same recipe).
 
+Roll-out status (2026-07-22): **12 units flashed to V22, 12 verified, 0
+failures**, across rooms 225, 219 and 211 — six ex-stock (via
+`fleet_flash_stock.py`, the Python port of the stock SHB OTA path), five
+ex-custom V15/V19 (pvvx path; the V15 unit needed the sudo raw-HCI
+helper — no fast window before V18), one bench-experiment unit. Stock
+reflashes change the BLE address (stock advertises `49:…`, custom uses
+the chip MAC `38:1F:8D:…`; the stock OTA mode advertises as `PPlusOTA`
+at stock-address+1), so `fleet_flash_stock.py` records old→new pairs in
+`fleet_flash_mapping.jsonl`, letting downstream consumers of the
+sensors carry device identity across the change (with a
+freezer/fridge temperature sanity check before renames are trusted).
+One unit deliberately runs its old
+battery at 5% as a V22 drain experiment. Two older IBS-TH units stay on
+stock firmware by policy (excellent as-is; hardcoded flasher blocklist).
+
 ## Frame-period probe build (branch `v21-frame-probe`, experimental)
 
 Purpose: run the prerequisite experiment for the V21 button-responsiveness
@@ -736,7 +751,14 @@ the connection collapse into a single press event fired after disconnect.
    validated slices.
 5. Button responsiveness (see "Button responsiveness options" above): run the
    frame-period experiment, then pick option 1 (60 s windows) or 2
-   (wake-on-RX) for V20.
+   (wake-on-RX) for V20. [DONE in V21: wake-on-RX.]
+6. V23 candidate — button-opened connect window: a button press opens the
+   60 s fast-advertising window (same one V18 opens on reset), making the
+   device connectable from Linux without a battery pull. Battery cost is
+   negligible; press events already reach the firmware within ~10 s via
+   wake-on-RX. Turns future fleet upgrades into "walk around clicking
+   buttons". (Phones and ESP32 proxies connect without this — the 4 s
+   create-connection limit is Linux-kernel-specific.)
 
 ## Historical Note
 
