@@ -3,3 +3,6 @@ Nrf/
 .idea
 build_boot_ibsth2p_*/
 __pycache__/
+bthome_phy6222/build*/
+bthome_phy6222/tests/test_ucap_frame
+bthome_phy6222/tests/test_ucap_sync

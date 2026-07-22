@@ -204,10 +204,23 @@ extern gapPeriConnectParams_t periConnParameters;
 extern uint16_t gapParameters[];
 static void set_adv_interval(uint16_t advInt);
 
+// Nonzero while an advertising restart from set_new_adv_interval() is in
+// flight. That function borrows GAPROLE_WAITING_AFTER_TIMEOUT as the SDK's
+// auto-re-advertise token (see GAP_END_DISCOVERABLE_DONE_EVENT in
+// thb2_peripheral.c), so the app state callback receives a fake
+// "supervision timeout" notification on every interval change. The V20
+// disconnect cleanup running on that fake notification re-armed
+// adv_reload_count and looped set_new_adv_interval() on every advertising
+// event — a teardown/restart storm at the minimum advertising interval
+// (~200 pkt/s, 7-8 mA). The counter lets the callback tell the bounce
+// apart from a real supervision timeout.
+static volatile uint8_t adv_restart_pending;
+
 // Set new advertising interval
 static void set_new_adv_interval(uint16_t advInt)
 {
 	set_adv_interval(advInt);
+	adv_restart_pending++;
 	GAP_EndDiscoverable( gapRole_TaskID );
 	gapRole_state = GAPROLE_WAITING_AFTER_TIMEOUT;
 	// Turn advertising back on.
@@ -608,6 +621,12 @@ void SimpleBLEPeripheral_Init( uint8_t task_id )
 #endif
 #if DEVICE == DEVICE_IBSTH2P
 	ucap_init();
+#ifdef UCAP_SYNC
+	// ucap_init() opened the boot acquisition window (UART locked until
+	// the first good frame). Arm its timeout so a silent main MCU lands
+	// in the miss/backoff path instead of holding the lock forever.
+	osal_start_timerEx(simpleBLEPeripheral_TaskID, SBP_UCAP_CLOSE_EVT, 15000);
+#endif
 #endif
 	set_serial_number();
 
@@ -809,6 +828,21 @@ uint16_t BLEPeripheral_ProcessEvent( uint8_t task_id, uint16_t events )
 		// stream it to a connected client (no-op if none listening).
 		probe_notify();
 		return ( events ^ SBP_PROBE_EVT);
+	}
+#endif
+#ifdef UCAP_SYNC
+	// Wake-on-RX scheduling (V21): frame arrivals and listen-window timers.
+	if( events & SBP_UCAP_FRAME_EVT) {
+		ucap_sync_frame_evt();
+		return ( events ^ SBP_UCAP_FRAME_EVT);
+	}
+	if( events & SBP_UCAP_OPEN_EVT) {
+		ucap_sync_open_evt();
+		return ( events ^ SBP_UCAP_OPEN_EVT);
+	}
+	if( events & SBP_UCAP_CLOSE_EVT) {
+		ucap_sync_close_evt();
+		return ( events ^ SBP_UCAP_CLOSE_EVT);
 	}
 #endif
 	if( events & TIMER_BATT_EVT) {
@@ -1103,6 +1137,10 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 			adv_wrk.adv_event = 0;
 			adv_wrk.meas_count = 0;
 			adv_wrk.adv_reload_count = 1;
+			// A connection ends any in-flight advertising restart; drop the
+			// pending marker so a later real supervision timeout is not
+			// mistaken for a set_new_adv_interval() bounce.
+			adv_restart_pending = 0;
 #if DEVICE == DEVICE_IBSTH2P
 			// Prevent sleep during BLE connection — needed for stable conn events
 			hal_pwrmgr_lock(MOD_USR0);
@@ -1131,15 +1169,25 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 
 		break;
 
-		case GAPROLE_WAITING:
-		// A link killed by supervision timeout (client walked out of range,
-		// died, or was killed without disconnecting) reports
-		// WAITING_AFTER_TIMEOUT instead of WAITING. It needs the same
-		// cleanup, most critically the MOD_USR0 unlock: before V20 this
-		// path leaked the sleep lock, leaving the chip fully awake
-		// (~1-2 mA) while advertising normally, until the next clean
-		// connect/disconnect cycle or a battery pull.
 		case GAPROLE_WAITING_AFTER_TIMEOUT:
+			// This state arrives two ways: a real supervision timeout
+			// (client walked out of range, died, or was killed without
+			// disconnecting), or the fake-state bounce set_new_adv_interval()
+			// uses to restart advertising with new parameters. Only the
+			// real timeout may run the disconnect cleanup below — cleanup on
+			// the bounce re-arms adv_reload_count and loops into the V20
+			// advertising storm (see adv_restart_pending above).
+			if (adv_restart_pending) {
+				adv_restart_pending--;
+				break;
+			}
+			// Real supervision timeout: needs the same cleanup as a clean
+			// disconnect, most critically the MOD_USR0 unlock — before V20
+			// this path leaked the sleep lock, leaving the chip fully awake
+			// (~1-2 mA) until the next clean connect/disconnect cycle or a
+			// battery pull.
+			// fall through
+		case GAPROLE_WAITING:
 			LOG("Gaprole_Disconnection\n");
 			osal_stop_timerEx(simpleBLEPeripheral_TaskID, TIMER_BATT_EVT);
 #if DEVICE == DEVICE_IBSTH2P

@@ -107,16 +107,22 @@
 #endif
 
 #if DEVICE == DEVICE_IBSTH2P
-// Frame-period probe build (V21 groundwork, experimental branch only):
+// Frame-period probe build (bench experiments only, ~1-2 mA continuous):
 // always-on UART RX, per-frame timestamp log, live BLE notifications.
-// Answers (a) the main MCU's real frame period and (b) whether a button
-// press emits an immediate extra frame. Costs 1-2 mA continuously — for
-// bench experiments only, do not deploy for normal use.
-#define UCAP_PROBE	1
+// Uncomment to build an IBS-XNN probe image; keep off for releases.
+//#define UCAP_PROBE	1
+
+// V21 wake-on-RX: frame-synced UART listen windows (ucap_sync.h) replace
+// the 5-minute grab cycle — sensor data and the button byte are read from
+// every ~10.4 s main-MCU frame at a fraction of the old listening cost.
+// Mutually exclusive with the probe build, which owns the UART lock.
+#ifndef UCAP_PROBE
+#define UCAP_SYNC	1
+#endif
 // Single source of the IBSTH2P firmware version: NN yields the "IBS-VNN"
 // Software Revision string and the BTHome firmware version object
 // (advertised as NN.0.0, see adv_set_data() in bthome_beacon.c).
-#define IBS_FW_VERSION	20
+#define IBS_FW_VERSION	21
 #ifdef UCAP_PROBE
 // 'X' instead of 'V' marks a probe image in the revision characteristic.
 #define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'X', '0' + (IBS_FW_VERSION / 10), '0' + (IBS_FW_VERSION % 10), 0}

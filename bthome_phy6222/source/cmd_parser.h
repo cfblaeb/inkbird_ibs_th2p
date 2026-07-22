@@ -109,6 +109,12 @@ int cmd_parser(uint8_t * obuf, uint8_t * ibuf, uint32_t len);
 int ucap_init(void);
 void ucap_start_grab(void);
 void ucap_update_measured_data(void);
+#ifdef UCAP_SYNC
+// Wake-on-RX event handlers (task context; see cmd_parser.c)
+void ucap_sync_frame_evt(void);
+void ucap_sync_open_evt(void);
+void ucap_sync_close_evt(void);
+#endif
 #ifdef UCAP_PROBE
 uint8_t probe_make_msg(uint8_t *pbuf); // frame-period probe live message
 #endif
