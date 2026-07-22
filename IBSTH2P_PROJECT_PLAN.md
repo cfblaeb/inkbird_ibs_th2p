@@ -468,6 +468,127 @@ Validation steps:
    one event (version object absent during the burst must not confuse
    the integration).
 
+Validation status (2026-07-21, unit 38:1F:8D:97:3B:39):
+
+- Step 1 (flash): **done** — release `BOOT_IBSTH2P_v20_ota.bin` flashed
+  over the pvvx OTA path (bleak, fast-adv window; 3173 blocks ~56 s,
+  on-device CRC32 verified before boot-magic write).
+- Step 2 (revision): **done** — post-reboot GATT read returned `IBS-V20`.
+- Step 3 (0xF2 advert): **done** — passive scan of the release image
+  captured `...f2 00 00 14` (version 20.0.0) at the end of the payload,
+  with packet id/battery/temperature/humidity/voltage decoding unchanged
+  (first verified on the X20 probe image, then re-verified post-flash).
+- Step 4 (HA entities + button event): **pending**.
+- Sleep-lock leak fix (cb0575e): **FAILED — V20 introduces a worse bug
+  on this same path.** Reproduced cleanly (connect with keep-alive
+  reads, `sudo hciconfig hci0 reset` to kill the link without a
+  disconnect packet, hands off the device):
+  1. After the supervision timeout the device advertises at ~1.6 s
+     (fast-reconnect window, BTHome payload intact and updating).
+  2. ~45-60 s later, when that window expires, the advertising interval
+     falls to **~20 ms** (the BLE minimum; ~180-220 reports/s observed)
+     instead of returning to 10 s — consistent with an interval
+     variable reading zero and being clamped to the floor. Measured
+     draw in this state: **7-8 mA** (vs ~1-2 mA for the V19 leak it
+     replaced; 2xAAA dead in days).
+  3. The state **survives connect + clean disconnect** (still ~177
+     reports/s after) — only a battery pull clears it. Clean
+     disconnects from the normal state are unaffected (normal BTHome
+     advertising resumes, verified).
+  Also noted: post-timeout packets showed BTHome packet id stuck at 1
+  across measurement updates. **Do not deploy V20 to the main unit** —
+  V19's 1-2 mA leak is the lesser evil. Fix candidate: find where the
+  timeout-path advert rebuild/window-expiry switch loses the normal
+  advertising interval (suspect the interval variable is never
+  (re)initialized on the `GAPROLE_WAITING_AFTER_TIMEOUT` → fast-window
+  → expiry sequence added/folded in cb0575e).
+
+## V21: advertising-storm fix + wake-on-RX (2026-07-22, flashed to bench unit)
+
+### Fix: V20 advertising storm after supervision timeout
+
+Root cause (code-traced, then confirmed by the fix's behavior on hardware):
+`set_new_adv_interval()` in thb2_main.c changes the advertising interval by
+stopping advertising and **faking `gapRole_state = GAPROLE_WAITING_AFTER_
+TIMEOUT`** — the state the SDK's `GAP_END_DISCOVERABLE_DONE_EVENT` handler
+special-cases to auto-restart advertising (thb2_peripheral.c). That handler
+also notifies the app, so the app callback receives a fake "supervision
+timeout" on every interval change. Harmless through V19 (the case only
+logged); V20's folded disconnect cleanup ran on it and re-armed
+`adv_reload_count = 1`, whose expiry calls `set_new_adv_interval()` again —
+a teardown/restart loop at radio speed (~200 pkt/s, 7-8 mA, frozen packet
+id, survives clean disconnects).
+
+V21 fix: an `adv_restart_pending` counter set by `set_new_adv_interval()`
+and consumed by the state callback — the fake-state bounce skips the
+disconnect cleanup, a real supervision timeout still gets it (including the
+V20 MOD_USR0 unlock). A connection clears the counter (belt-and-braces).
+
+### Feature: wake-on-RX (frame-synced UART listen windows)
+
+Replaces the 5-minute grab cycle. The scheduler (`source/ucap_sync.h`,
+pure C, host-tested in `tests/test_ucap_sync.c` — 24 checks incl. a
+2000-frame drift simulation: 100% catch rate, 0.78% listen duty) predicts
+each ~10.4 s main-MCU frame from the last one and opens a short adaptive
+window around it: guard starts at ±250 ms, narrows to ±60 ms only after
+8 consecutive catches, widens on any miss, escalates to full-period
+reacquire after 2 misses and to one attempt per 5 min after 6 (a dead main
+MCU cannot pin the receiver on). Per the one-device caveat, nothing is
+hard-assumed about the period: the estimate trains per unit (EMA, bounds
+8-13 s) and button-inserted off-schedule frames anchor phase but never
+train it. Device glue in cmd_parser.c (three OSAL events, reusing the
+V16-validated UART lock/early-release machinery); `cfg.measure_interval`
+pinned to 1 so the advertised payload refreshes from the latest frame on
+every 10 s advertising event (packet id now advances every ~10 s).
+Estimated cost: ~10-20 µA average vs ~26-60 µA for the old grabs —
+years of battery, with 10 s sensor freshness and ≤~20 s button latency.
+
+### Build provenance and artifacts
+
+Toolchain re-pinned from Debian (gcc-arm-none-eabi 15:14.2.rel1-1 +
+newlib 4.5.0.20241231-1, deb.debian.org; Ubuntu binutils 2.42-1ubuntu1+23)
+and re-validated: rebuilt V19 and V20 sources reproduce the committed
+hexes **byte-for-byte**. Pitfall for future rebuilds: pass exactly
+`CC="<debtc>/root/usr/bin/arm-none-eabi-gcc -B<debtc>/xbin
+-B<debtc>/root/usr/lib/arm-none-eabi/newlib -isystem
+<debtc>/root/usr/include/newlib"` — adding an extra `-B` for the gcc
+libdir changes the linker's library search order and reorders veneers
+(same map, different BL encodings).
+
+Artifacts: `inkbird_fw/BOOT_IBSTH2P_v21.hex` / `..._ota.bin`.
+Stock-path STAGE3 bundle not yet built.
+
+### Validation status
+
+- Flashed to bench unit 38:1F:8D:97:3B:39 over the pvvx OTA path
+  2026-07-22 (from the V20 storm state — instantly connectable);
+  post-reboot revision reads `IBS-V21`, on-air 0xF2 = 21.0.0.
+- Wake-on-RX: **working on air** — packet id advances +1 per 10 s
+  advertisement with live humidity/battery movement (V20: one change per
+  5 min).
+- Storm fix, interval-restore path: **validated** — after a clean
+  disconnect + 60 s fast-window expiry the cadence settles at 10.0 s
+  (this exact transition stormed on V20).
+- Overnight soak (2026-07-22, 7 hourly samples): steady 10 s cadence,
+  packet id advancing on schedule across ~49 RTC wraps — no storm, no
+  silence.
+- Meter (2026-07-22): idle **10-15 µA** with a few-mA blip every ~10 s
+  (listen window + advertisement) — the device genuinely sleeps between
+  windows; no stuck UART lock.
+- Supervision-timeout repro (2026-07-22, `sudo hciconfig hci0 reset`
+  while connected with keep-alives, hands off; run twice, second run
+  meter-observed): advertising settled straight back to clean 10.0 s
+  cadence, and the meter showed ~3.5 mA briefly (timeout ride-out) then
+  ~0 with 3-5 mA blips every 10 s — **storm fix and sleep-lock release
+  both validated on the exact transition that melted V20** (the V15-V19
+  leak would park at 1-2 mA, the V20 storm at 7-8 mA).
+- Button press: event on air (`3a 01`, version object absent during the
+  burst as designed) ~27 s after the operator's wall-clock press — within
+  the ≤ ~20 s design chain plus unsynchronized-clock slack.
+- Still open: HA entity check (validation step 4 of V20 carried over),
+  stock-path STAGE3 bundle build, commit of the V21 tree, main-unit
+  (38:1F:8D:CF:77:6F) upgrade decision.
+
 ## Frame-period probe build (branch `v21-frame-probe`, experimental)
 
 Purpose: run the prerequisite experiment for the V21 button-responsiveness
@@ -506,6 +627,32 @@ How to run the experiment:
 4. Record both answers in this plan, pick option 1 or 2 for V21, then
    reflash the unit with the release V20 image.
 
+### Results (2026-07-21, unit 38:1F:8D:97:3B:39, 14 min live capture)
+
+- **(a) Steady frame period: ~10.38 s** — min 10.34 / median 10.38 /
+  max 10.41 s over 79 clean intervals. The slow 10.35→10.41 s drift over
+  the run (and the non-integer value) marks this as the main MCU's own
+  free-running clock, not the BLE side's 10 s connected-grab timer
+  (probe UART is always-on, so grab windows play no role). Boot behavior
+  (from `--dump` right after battery pull): 2 frames ~2 s apart, then
+  the steady cadence.
+- **(b) Button press emits an immediate extra frame: YES, 3/3.** The
+  btn byte (`[8]`) toggles per press (0x01→0x00→0x01→0x00). The press
+  frame is *inserted* — the next periodic frame still arrives on the
+  original schedule (press-dt + following-dt = 10.38-10.39 s in all
+  three cases).
+- Note: `--dump` cannot measure (a) in practice — the ring resets on
+  boot and connecting requires a battery pull, so it only ever shows
+  the boot burst. Use live/guided mode (stays connected) instead.
+  `--guided` now walks the whole experiment interactively.
+
+Consequences for the V21 choice: option 2 (wake-on-RX) is viable — an
+immediate press frame always exists to wake on; the waking frame itself
+is lost mid-byte, so press latency ≈ remainder of one frame period,
+worst case ~10.4 s. Option 1's loss window per grab gap is now exact:
+a 60 s `measure_interval` window misses a press pair only if both land
+in the same ~50 s gap; each grab costs ~one 10.4 s frame period awake.
+
 ## Button responsiveness options (V21 candidates, 2026-07-21)
 
 Background: the stock inter-chip frame carries no press counter — payload is
@@ -513,8 +660,9 @@ fully decoded (see protocol section) and the main MCU is not field-updatable,
 so the latched level in payload `[7]` is all we get. A press is only detected
 when a grab window observes a level change, so today: up to ~5 min latency,
 and an even number of presses between two windows cancels out. The main MCU
-streams frames continuously (period: a few seconds, not precisely measured),
-so the loss window equals our observation gap — nothing inherent about 5 min.
+streams frames continuously (measured 2026-07-21: ~10.38 s period, plus an
+immediate extra frame per button press — see probe results above), so the
+loss window equals our observation gap — nothing inherent about 5 min.
 
 Note: `cfg.measure_interval`/`cfg.advertising_interval` are hard-pinned for
 IBSTH2P in `test_config()` (`config.c:167-168`), so every option below needs a
