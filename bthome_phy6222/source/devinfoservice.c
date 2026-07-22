@@ -162,7 +162,7 @@ uint8 devInfoSerialNumber[19]; // = "000000-00000000-00"; // FLASH_ID-SENSOR_ID-
 #if FIRMWARE_REVISION_ENABLE
 // Firmware Revision String characteristic
 static uint8 devInfoFirmwareRevProps		=	GATT_PROP_READ;
-static const uint8 devInfoFirmwareRev[]		=	"github.com/pvvx";
+static const uint8 devInfoFirmwareRev[]		=	"github.com/cfblaeb/inkbird_ibs_th2p";
 #endif
 
 #if	HARDWARE_REVISION_ENABLE
