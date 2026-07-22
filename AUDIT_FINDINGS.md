@@ -100,7 +100,39 @@ The app configures UART0 RX-only with cfg.tx_pin = GPIO_DUMMY (0xFF) in ucap_ini
 
 ### 3. [MEDIUM] `bthome_phy6222/source/battery.c:183` — low_vbat 60-min sleep tick overflows 24-bit RTC comparator (wakes every 16 s)
 
-*Status: unverified · Reachability: shipped build*
+*Status: **CONFIRMED** (arithmetic + SDK trace) — duplicates: #7, #14.*
+
+Verified: `low_vbat()` (battery.c:183) requests
+`hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15)` = 117,964,800 ticks. The SDK
+(`config_RTC1`, SDK/lib/rf/patch.c:5610) programs the wake comparator as
+`AP_AON->RTCCC0 = RTCCNT + time` with no range check. The PHY62xx AON RTC
+counter/comparator is 24-bit (SDK's own mesh code masks `RTCCNT & 0xffffff`,
+appl_prov.c:22; config.h reference comment "max 512 sec"), so only the low
+24 bits of the sum matter: 117,964,800 mod 2^24 = 524,288 ticks = exactly
+16.0 s. The predicted symptom falls out of the arithmetic precisely: the
+"60-minute" hibernate wakes after 16 seconds.
+
+Aggravators found during verification:
+- The wake is a warm RESET with SRAM retention cleared, and V18 makes every
+  reset start the 60 s fast-advertising window (1.56 s interval). Net: a
+  device that should hibernate on a dying battery instead reboots every
+  16 s and spends its entire remaining life in the most radio-active mode
+  the firmware has. End-of-life behavior is the opposite of the design
+  intent, actively finishing off the battery.
+- `check_battery()` (battery.c:191) trips `low_vbat()` on a SINGLE raw ADC
+  reading < 2000 mV, before any averaging. A transient dip — cold battery in
+  a freezer (this device's canonical use), or a radio TX burst — can fire
+  it spuriously; each spurious trip costs a 16 s reboot cycle, and a cold
+  aging battery can oscillate in and out of the loop.
+
+Fix candidate (not yet applied): the wake-by-reset design cannot count
+multiple comparator periods (RAM is cleared), so the honest fix is to clamp
+the request to the hardware: sleep `510<<15` ticks (~8.5 min) per cycle.
+Battery is re-checked at each boot anyway; 8.5-minute checks are 7x more
+frequent than the intended 60 min but 32x less than the current 16 s, and
+the constant stays within the 24-bit comparator by construction. Optionally
+also gate `low_vbat()` on two consecutive low readings to kill the
+transient-dip trigger.*
 
 low_vbat() calls hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15) = 117,964,800 ticks. The AON RTC counter/comparator is 24-bit (wraps every 512 s at 32768 Hz; see the ucap_rtc() comment in cmd_parser.c:88-89 and the SDK's config_RTC1 in SDK/lib/rf/patch.c:5609, which writes sleep_tick + time straight into AP_AON->RTCCC0 with no range check). 117,964,800 mod 2^24 = 524,288 ticks = 16.0 s, so the intended 60-minute low-battery hibernation actually wakes (via warm reset, since hal_pwrmgr_enter_sleep_rtc_reset clears SRAM retention and reboots) after only 16 seconds — or, if the comparator latched the upper bits, never fires and the unit is dead until a battery pull. Every wake is a full boot: 60 s fast-advertising window at ~1.56 s interval, boot UART grab window holding MOD_UART0 for up to 15 s, ADC measure, then check_battery() -> low_vbat() again.
 
@@ -132,7 +164,7 @@ CMD_OTA_SET validates `program_offset + (pkt_total << 4) <= FADDR_START_ADDR + F
 
 ### 7. [MEDIUM] `bthome_phy6222/source/cmd_parser.c:961` — CMD_ID_FIX_MAC erases physical flash sector 0 in place; power loss in window bricks device
 
-*Status: unverified · Reachability: shipped build*
+*Status: **CONFIRMED** — duplicate of #3, see there for the verified analysis and fix candidate.*
 
 write_fix_mac() (reachable via CMD_ID_FIX_MAC, compiled in the shipped OTA_TYPE_BOOT build, cmd_parser.c:1283) reads physical sector 0 into a 4 KB stack buffer, then erases it via the address-wrap trick (`hal_flash_erase_sector(FLASH_ADDR_RINFO + phy_flash.Capacity)` with Capacity |= 2 MB wraps to physical 0x00000 on the 512 KB die) and rewrites it in sixteen 256-byte chunks (lines 961-963). Sector 0 holds the PHY6222 ROM boot information (partition table, chip MAC area at 0x900). There is no staging copy: between the erase and the last chunk write the only copy of the boot sector is in RAM.
 
@@ -188,7 +220,7 @@ During a connection the IBSTH2P TIMER_BATT_EVT handler unconditionally rearms it
 
 ### 14. [MEDIUM] `bthome_phy6222/source/thb2_main.c:1180` — Stranded adv_restart_pending eats a real supervision timeout, re-leaking MOD_USR0
 
-*Status: unverified · Reachability: shipped build*
+*Status: **CONFIRMED** — duplicate of #3, see there for the verified analysis and fix candidate.*
 
 adv_restart_pending is incremented unconditionally in set_new_adv_interval() (line 223) but is only decremented when the fake GAPROLE_WAITING_AFTER_TIMEOUT notification actually arrives, and only reset on GAPROLE_CONNECTED. If the bounce's GAP_EndDiscoverable fails (return value ignored, no DONE event ever posted) or END_DISCOVERABLE_DONE completes with status != SUCCESS (thb2_peripheral.c:1147-1152 then notifies GAPROLE_ERROR, which the app callback merely logs), the counter is stranded at 1 with no connection to clear it. The next REAL supervision timeout is then consumed by the `if (adv_restart_pending) { adv_restart_pending--; break; }` guard, skipping the entire disconnect cleanup including hal_pwrmgr_unlock(MOD_USR0) at line 1195.
 
