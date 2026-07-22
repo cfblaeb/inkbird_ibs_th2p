@@ -589,6 +589,20 @@ Stock-path STAGE3 bundle not yet built.
   stock-path STAGE3 bundle build, commit of the V21 tree, main-unit
   (38:1F:8D:CF:77:6F) upgrade decision.
 
+## V22: fleet release (V21 + repo-correct firmware URL)
+
+Identical to V21 except the GATT Firmware Revision String
+(devinfoservice.c) now reads `github.com/cfblaeb/inkbird_ibs_th2p`
+instead of the inherited `github.com/pvvx`, and `IBS_FW_VERSION` is 22 —
+the two units already deployed with 21.0.0 binaries keep their meaning
+in a 0xF2 fleet audit. Intended as the image for the ~20-device fleet
+roll-out. Validation: first fleet unit flashed confirms revision
+`IBS-V22`, 0xF2 = 22.0.0, and 10 s packet cadence; everything else is
+V21's hardware-validated behavior unchanged.
+
+Artifacts: `inkbird_fw/BOOT_IBSTH2P_v22.hex` / `..._ota.bin` /
+`STAGE3_IBSTH2P_v22_stock_bundle_*` (pinned toolchain, same recipe).
+
 ## Frame-period probe build (branch `v21-frame-probe`, experimental)
 
 Purpose: run the prerequisite experiment for the V21 button-responsiveness
@@ -663,6 +677,16 @@ and an even number of presses between two windows cancels out. The main MCU
 streams frames continuously (measured 2026-07-21: ~10.38 s period, plus an
 immediate extra frame per button press — see probe results above), so the
 loss window equals our observation gap — nothing inherent about 5 min.
+
+Measurement cadence inside the frames (observed 2026-07-22 on a V21 unit
+with a warming/cooling experiment): the main MCU only refreshes its
+temperature/humidity reading every ~10-30 s — identical values repeat
+across 1-3 consecutive frames when the environment is stable, and update
+on consecutive frames under rapid change. So V21+ delivers *frame*
+freshness of 10 s but *measurement* freshness of 10-30 s; that floor is
+in the non-updatable main MCU. Side effect for Home Assistant: recorder
+churn is bounded by actual environmental change (HA writes no state for
+identical values), not by the 10 s packet cadence.
 
 Note: `cfg.measure_interval`/`cfg.advertising_interval` are hard-pinned for
 IBSTH2P in `test_config()` (`config.c:167-168`), so every option below needs a
