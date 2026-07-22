@@ -93,6 +93,21 @@ async def find_device(match, timeout=20):
 async def mode_switch(stock_addr):
     """Connect to the app-mode stock device and reboot it into PPlusOTA.
     Returns the OTA device's address (may equal the stock address)."""
+    # Audit #17: snapshot PPlusOTA advertisers already on air BEFORE the
+    # mode switch, so a unit left in OTA mode by an aborted run (or a
+    # concurrent flash) can't be latched as "our" device afterwards.
+    stale_ota = set()
+
+    def note_ota(dev, adv):
+        if (adv.local_name or "").startswith("PPlusOTA"):
+            stale_ota.add(dev.address.upper())
+
+    async with BleakScanner(note_ota):
+        await asyncio.sleep(6)
+    if stale_ota:
+        log(f"WARNING: pre-existing PPlusOTA advertisers in range, will be "
+            f"ignored as flash targets: {sorted(stale_ota)}")
+
     log(f"connecting to stock device {stock_addr} ...")
     disconnected = asyncio.Event()
     client = BleakClient(stock_addr, timeout=25,
@@ -125,9 +140,10 @@ async def mode_switch(stock_addr):
             await client.disconnect()
         except Exception:
             pass
-    log("waiting for PPlusOTA advertiser ...")
+    log("waiting for a NEW PPlusOTA advertiser ...")
     addr, name = await find_device(
-        lambda d, a: (a.local_name or "").startswith("PPlusOTA"), 30)
+        lambda d, a: ((a.local_name or "").startswith("PPlusOTA")
+                      and d.address.upper() not in stale_ota), 30)
     log(f"found {name} at {addr}")
     return addr
 
@@ -233,15 +249,28 @@ async def main():
         f"{sum(p.size for p in parts)} bytes")
 
     # Snapshot the custom devices already on air so the new one stands out.
+    # Audit #18: seed with every new_addr ever recorded in the mapping file
+    # (units flashed in earlier runs are custom by definition), and scan for
+    # 25 s ≈ 2.5 advertising intervals of the 10 s fleet cadence — a single
+    # 10 s window could miss a deployed unit's one advert and let
+    # watch_new_custom() misattribute it as the just-flashed device.
     known = set()
+    map_file = Path(__file__).parent / "fleet_flash_mapping.jsonl"
+    if map_file.exists():
+        for line in map_file.read_text().splitlines():
+            try:
+                known.add(json.loads(line)["new_addr"].upper())
+            except (ValueError, KeyError):
+                pass
+        log(f"seeded {len(known)} known custom addrs from {map_file.name}")
 
     def note(dev, adv):
         if dev.address.upper().startswith("38:1F:8D"):
             known.add(dev.address.upper())
 
     async with BleakScanner(note):
-        await asyncio.sleep(10)
-    log(f"pre-flash custom devices in range: {sorted(known) or 'none'}")
+        await asyncio.sleep(25)
+    log(f"pre-flash custom devices in range/known: {sorted(known) or 'none'}")
 
     ota_addr = await mode_switch(stock_addr)
     await shb_upload(ota_addr, parts)

@@ -314,6 +314,7 @@ extern bStatus_t GAPRole_extAdv_GetParameter( uint8 adv_handler, uint16 param, v
 
 extern uint16 gapRole_AdvertOffTime;
 extern uint8  gapRole_AdvEnabled;
+extern uint8  gapRole_AdvRestartReq; // V23: adv restart-with-new-params in flight
 extern uint8  gapRole_AdvertDataLen;
 extern uint8  gapRole_AdvertData[B_MAX_ADV_LEN];
 extern uint8  gapRole_ScanRspDataLen;

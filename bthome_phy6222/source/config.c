@@ -79,10 +79,11 @@ uint32_t get_utc_time_sec(void) {
 #else
 	new_time_tik = AP_AON->RTCCNT;
 #endif
-	if(new_time_tik <= clkt.utc_time_tik)
-		delta = new_time_tik - clkt.utc_time_tik;
-	else
-		delta = 0xffffffff - clkt.utc_time_tik + new_time_tik;
+	// V23 (audit #30): unsigned subtraction handles counter wrap by itself
+	// (the & 0x1fffff mask below folds a 24-bit RTC wrap correctly since
+	// 2^24 is a multiple of 2^21). The old inverted if/else computed
+	// delta-1 on the normal path, losing ~1 tick (~30 us) per call.
+	delta = new_time_tik - clkt.utc_time_tik;
 	clkt.utc_time_tik = new_time_tik;
 	delta &= 0x1fffff; // 64 sec max
 	// delta in us
