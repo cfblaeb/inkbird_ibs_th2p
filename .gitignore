@@ -6,3 +6,8 @@ __pycache__/
 bthome_phy6222/build*/
 bthome_phy6222/tests/test_ucap_frame
 bthome_phy6222/tests/test_ucap_sync
+inkbird_fw/build/stock_bundle_installer/*.o
+inkbird_fw/build/stock_bundle_installer/*.elf
+inkbird_fw/build/stock_bundle_installer/*.map
+inkbird_fw/build/stock_bundle_installer/*.asm
+inkbird_fw/build/stock_bundle_installer/*.bin
