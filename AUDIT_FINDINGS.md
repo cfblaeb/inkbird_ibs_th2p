@@ -158,7 +158,24 @@ low_vbat() calls hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15) = 117,964,800 tic
 
 ### 6. [MEDIUM] `bthome_phy6222/source/ble_ota.c:157` — OTA bound uses 2 MB FLASH_MAX_SIZE on 512 KB part; wraps over EEP banks and firmware
 
-*Status: unverified · Reachability: shipped build*
+*Status: **CONFIRMED (source) / defanged in shipped binaries** — severity downgraded to LOW.*
+
+Verified: cmd_parser.c:1026 really does take `(dev_id_t *)&obuf` — the
+address of the pointer *parameter*, not the buffer — and writes
+`p->dev_spec_data` (offset 6) through it. That is undefined behavior and
+would corrupt stack next to the parameter slot. HOWEVER, disassembly of the
+shipped image (build_boot_ibsth2p_v20 asm, code unchanged since V10 era)
+shows the compiled DEVID case contains ONLY `memcpy(obuf,&dev_id,12)` +
+`olen=12`: the pinned gcc 14.2 optimizer deleted the UB store entirely.
+So in every shipped binary there is no memory corruption — the bug's real
+effect is functional: the DEVID reply's dev_spec_data field never carries
+`thsensor_cfg.sensor_type` as intended and always reports the static
+initializer value instead. A different compiler/flags could reintroduce a
+live wild store, so the one-character fix (`(dev_id_t *)obuf`) should ride
+along in the next release batch. Cross-module check: none of the repo's own
+tooling reads dev_spec_data (InkbirdOTA.html detects by GATT services;
+fleet scripts read the revision string), so correcting the reply changes
+nothing for existing workflows.*
 
 CMD_OTA_SET validates `program_offset + (pkt_total << 4) <= FADDR_START_ADDR + FLASH_MAX_SIZE` where FLASH_MAX_SIZE is 0x200000 (ble_ota.h:13) but the IBS-TH2P flash is 512 KB (FLASH_SIZE 0x80000). The default start path (msg_size==2 at line 162) applies NO size bound at all: pkt_total is taken from the image's own size field in packet 0 (line 202). hal_flash_write/hal_flash_erase_sector (SDK flash.c) perform no capacity check, and the SPI die ignores high address bits, so addresses past 0x80000 wrap to physical offset 0. The per-packet erase (line 232) and write (line 235) therefore march through the EEP config banks at 0x7C000-0x7FFFF at transfer offset ~432 KB, then wrap at 512 KB and erase/overwrite physical sector 0 (flash boot info) and the running firmware — all before the final CRC32 check (which only gates the boot-flag write) can reject the image.
 
