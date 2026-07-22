@@ -711,19 +711,37 @@ Artifacts (V22 set retained as validated fallback):
 `inkbird_fw/BOOT_IBSTH2P_v23.hex` / `BOOT_IBSTH2P_v23_ota.bin` /
 `STAGE3_IBSTH2P_v23_stock_bundle_installer.hex16` (+ payload).
 
-Validation steps:
-1. Flash one unit (pvvx path). Confirm `IBS-V23`, BTHome data flowing.
-2. Interval-change stress: battery-pull, connect during the fast window,
-   stay connected past the 60 s expiry — measurements must keep arriving
-   every ~10 s during the connection (the old race killed them), then
-   disconnect and confirm 10 s advertising resumes.
-3. Supervision-timeout check (V20 regression class): connect, toggle
-   phone BT off, wait ~4 s; confirm advertising resumes AND sleep current
-   returns to baseline.
-4. Connect/disconnect cycling (10x) — no stuck advertising, no fast-adv
-   storm (the V21 fix's regression class).
+Validation steps (1-4 DONE 2026-07-23 on test unit 38:1F:8D:97:3B:39,
+raw-HCI harness from the laptop; log: scratchpad v23_conn_test.py):
+1. ~~Flash one unit (pvvx path). Confirm `IBS-V23`, BTHome data flowing.~~
+   PASS — BTHome fw_version 23.0.0 on air, packet_id advances exactly
+   every 10 s (17 ids over 170 s), sane sensor values.
+2. ~~Stay connected past 60 s — measurements must keep arriving during
+   the connection, then disconnect and confirm 10 s advertising
+   resumes.~~ PASS — 75 s connection hold: nonconn adverts kept coming at
+   clean 10 s spacing (scanner control: 1373 reports from other devices
+   in the same window), 10 s advertising after the link ended. (First
+   attempt showed 0 adverts — host-side scan artifact, not firmware;
+   rerun with the scanner-alive control settled it.) Battery-pull
+   fast-window variant also PASS: fast window opened on reinsert
+   (1.5 s adverts), plain bleak connect landed on attempt 1 (~5 s in,
+   no sudo needed), link survived the 60 s interval-restore expiry
+   firing mid-connection, and after graceful disconnect the device
+   settled straight back to 10 s cadence — no storm. (Owner note:
+   advertising during a connection is a nice-to-have, not a
+   requirement.) Host-side pitfall for future runs: BlueZ refuses
+   Connect while discovery is active — stop scanning before
+   connecting (see scratchpad v23_fastwindow_test.py).
+3. ~~Supervision-timeout check (V20 regression class).~~ PASS — host
+   radio killed ungracefully mid-connection (hci0 down, no LL
+   terminate); device recovered on its own to clean 10 s advertising.
+   Sleep-current-meter check not repeated (V21 already validated it and
+   V23 didn't touch the sleep path).
+4. ~~Connect/disconnect cycling (10x) — no stuck advertising, no fast-adv
+   storm.~~ PASS — 10/10 connects succeeded, advertising resumed at 10 s
+   after every disconnect, zero sub-2 s gaps (no storm).
 5. Fleet-flash one stock unit with the updated fleet_flash_stock.py and
-   verify the mapping line pairs the right addresses.
+   verify the mapping line pairs the right addresses. (Still open.)
 
 ## Button responsiveness options (V21 candidates, 2026-07-21)
 
