@@ -73,6 +73,9 @@ extern gapPeriConnectParams_t periConnParameters;
 // to wake the main MCU's UART receiver.
 
 #include "ucap_frame.h"
+#ifdef UCAP_SYNC
+#include "ucap_sync.h"
+#endif
 
 #define FRAME_SIZE  UCAP_FRAME_SIZE
 
@@ -80,6 +83,20 @@ extern gapPeriConnectParams_t periConnParameters;
 #define RAWCAP_SIZE 64
 static uint8_t rawcap_buf[RAWCAP_SIZE];
 static volatile uint8_t rawcap_pos = 0;
+
+#if defined(UCAP_PROBE) || defined(UCAP_SYNC)
+// Raw RTC counter read (AP_AON->RTCCNT, 24-bit @32768 Hz, wraps every
+// 512 s — delta consumers handle wrap with 24-bit modular arithmetic).
+// Self-contained and ISR-safe; same double-read pattern as the reference
+// in config.h.
+static uint32_t ucap_rtc(void) {
+	uint32_t t;
+	do {
+		t = *(volatile uint32_t *)0x4000f028;
+	} while (t != *(volatile uint32_t *)0x4000f028);
+	return t & 0xFFFFFF;
+}
+#endif
 
 #ifdef UCAP_PROBE
 // Frame-period probe: timestamp every valid frame so inter-frame deltas
@@ -95,17 +112,7 @@ typedef struct __attribute__((packed)) {
 } probe_rec_t;
 static probe_rec_t probe_log[PROBE_LOG_SIZE];
 static volatile uint16_t probe_cnt = 0;
-
-// Raw RTC counter read (AP_AON->RTCCNT, 24-bit @32768 Hz, wraps every
-// 512 s — the host tooling handles wrap on deltas). Self-contained and
-// ISR-safe; same double-read pattern as the reference in config.h.
-static uint32_t probe_rtc(void) {
-	uint32_t t;
-	do {
-		t = *(volatile uint32_t *)0x4000f028;
-	} while (t != *(volatile uint32_t *)0x4000f028);
-	return t & 0xFFFFFF;
-}
+#define probe_rtc ucap_rtc
 #endif // UCAP_PROBE
 
 typedef struct {
@@ -140,6 +147,16 @@ typedef struct {
 	volatile uint8_t  btn_known;
 	volatile uint8_t  btn_last;      // last observed byte [8] level
 	volatile uint32_t btn_clicks;    // monotonic count of detected changes
+
+#ifdef UCAP_SYNC
+	// Frame-synced scheduling (wake-on-RX, see ucap_sync.h). The ISR
+	// timestamps each good frame and precomputes the delta to the previous
+	// one; the task-context handlers below turn that into listen windows.
+	volatile uint32_t last_tik;      // RTC ticks of the last good frame
+	volatile uint32_t frame_dt_ms;   // delta to the previous good frame
+	volatile uint8_t  have_prev;     // 0 -> frame_dt_ms is DT_UNKNOWN
+	ucap_sync_t sync;
+#endif
 } uart_capture_t;
 
 uart_capture_t ucap;
@@ -197,6 +214,21 @@ static void ucap_process_frame(void) {
 		ucap.grab_active = 0;
 		hal_pwrmgr_unlock(MOD_UART0);
 	}
+#ifdef UCAP_SYNC
+	// Timestamp the frame and hand scheduling off to task context.
+	{
+		uint32_t t = ucap_rtc();
+		if (ucap.have_prev) {
+			uint32_t dt = (t - ucap.last_tik) & 0xFFFFFF; // 24-bit RTC
+			ucap.frame_dt_ms = (dt * 125u) >> 12;         // ticks -> ms
+		} else {
+			ucap.frame_dt_ms = UCAP_SYNC_DT_UNKNOWN;
+			ucap.have_prev = 1;
+		}
+		ucap.last_tik = t;
+		osal_set_event(simpleBLEPeripheral_TaskID, SBP_UCAP_FRAME_EVT);
+	}
+#endif
 #endif
 }
 
@@ -222,6 +254,9 @@ int ucap_init(void) {
 	memset(&ucap, 0, sizeof(ucap));
 	memset(rawcap_buf, 0, sizeof(rawcap_buf));
 	rawcap_pos = 0;
+#ifdef UCAP_SYNC
+	ucap_sync_init(&ucap.sync);
+#endif
 
 	uart_Cfg_t cfg;
 	memset(&cfg, 0, sizeof(cfg));
@@ -266,6 +301,10 @@ void ucap_start_grab(void) {
 	return;
 #endif
 	if (ucap.uart_inited) {
+		// Window already open (boot acquisition, or a UCAP_SYNC listen
+		// window): a deinit here would drop an in-flight frame.
+		if (ucap.grab_active)
+			return;
 		// After sleep, UART hardware is powered down.
 		// Lock alone doesn't restore it — must deinit+init to reconfigure.
 		hal_uart_deinit(UART0);
@@ -288,16 +327,65 @@ void ucap_update_measured_data(void) {
 		measured_data.temp = -(int16_t)(ucap.good_frames ? ucap.good_frames : 1);
 		measured_data.humi = -(int16_t)(ucap.fr.crc_bad ? ucap.fr.crc_bad : 1);
 	}
-#ifndef UCAP_PROBE
+#if !defined(UCAP_PROBE) && !defined(UCAP_SYNC)
 	// Close the grab window. Normally the first good frame already
 	// released the UART lock; this is the fallback for a window with no
 	// frames (unlock of an already-unlocked module is a harmless no-op).
+	// (Not under UCAP_SYNC: the sync engine owns window close, and this
+	// runs every advertising event — it must not slam a window that was
+	// just opened for the upcoming frame.)
 	if (ucap.uart_inited) {
 		ucap.grab_active = 0;
 		hal_pwrmgr_unlock(MOD_UART0);
 	}
 #endif
 }
+
+#ifdef UCAP_SYNC
+/*
+ * Wake-on-RX scheduling (V21). The scheduler arithmetic lives in
+ * ucap_sync.h (host-tested); these handlers own the OSAL timers and the
+ * UART window, and run in task context off three events:
+ *
+ *   SBP_UCAP_FRAME_EVT  a good frame arrived (ISR already released the
+ *                       UART lock and precomputed frame_dt_ms)
+ *   SBP_UCAP_OPEN_EVT   time to open the next listen window
+ *   SBP_UCAP_CLOSE_EVT  window timeout (a miss if the window is still open)
+ *
+ * Boot: ucap_init() opens the acquisition window; simpleBLEPeripheral_Init
+ * arms a CLOSE timeout for it, so a silent main MCU degrades into the
+ * miss/backoff path instead of holding the UART lock forever.
+ */
+void ucap_sync_frame_evt(void) {
+	// The frame beat any pending window timeout; it's not a miss.
+	osal_stop_timerEx(simpleBLEPeripheral_TaskID, SBP_UCAP_CLOSE_EVT);
+	osal_start_timerEx(simpleBLEPeripheral_TaskID, SBP_UCAP_OPEN_EVT,
+			ucap_sync_on_frame(&ucap.sync, ucap.frame_dt_ms));
+}
+
+void ucap_sync_open_evt(void) {
+	ucap_start_grab();
+	osal_start_timerEx(simpleBLEPeripheral_TaskID, SBP_UCAP_CLOSE_EVT,
+			ucap_sync_window_ms(&ucap.sync));
+}
+
+void ucap_sync_close_evt(void) {
+	uint32_t delay;
+	// If the frame arrived between the timer firing and this handler
+	// running, the ISR already closed the window and queued FRAME_EVT.
+	if (!ucap.grab_active)
+		return;
+	ucap.grab_active = 0;
+	hal_pwrmgr_unlock(MOD_UART0);
+	// The next frame's delta will span at least one unobserved period.
+	ucap.have_prev = 0;
+	delay = ucap_sync_on_miss(&ucap.sync);
+	if (delay == 0)
+		ucap_sync_open_evt(); // reacquire: reopen immediately, full period
+	else
+		osal_start_timerEx(simpleBLEPeripheral_TaskID, SBP_UCAP_OPEN_EVT, delay);
+}
+#endif // UCAP_SYNC
 
 #ifdef UCAP_PROBE
 // Build the live probe notification for the most recent frame:

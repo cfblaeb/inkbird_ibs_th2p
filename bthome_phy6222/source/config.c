@@ -165,7 +165,15 @@ void test_config(void) {
 #if DEVICE == DEVICE_IBSTH2P
 	// Keep IBSTH2P on a low duty cycle, but stay inside the documented 1..160 range.
 	cfg.advertising_interval = 160; // 160 * 100 * 625us = 10 sec
+#ifdef UCAP_SYNC
+	// Wake-on-RX (V21): the sync engine catches every ~10.4 s main-MCU
+	// frame, so refresh the advertised payload from the captured values on
+	// every advertising event instead of every 5 minutes. Grab windows are
+	// no longer opened from this cycle (see ucap_sync_* in cmd_parser.c).
+	cfg.measure_interval = 1;
+#else
 	cfg.measure_interval = 30;      // 30 * 10 sec = 5 min between measurements
+#endif
 #else
 	if(cfg.measure_interval < 2)
 		cfg.measure_interval = 2;

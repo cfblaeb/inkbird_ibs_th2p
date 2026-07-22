@@ -70,6 +70,9 @@ extern "C"
 #define KEY_CHANGE_EVT        0x0200  // Key press/release event from interrupt
 #define LCD_TIMER_EVT         0x0400  // Timer related to display sleep and key long press feature expired
 #define SBP_PROBE_EVT         0x0800  // UCAP_PROBE: new UART frame logged, stream it over BLE
+#define SBP_UCAP_FRAME_EVT    0x1000  // UCAP_SYNC: good frame received, schedule next window
+#define SBP_UCAP_OPEN_EVT     0x2000  // UCAP_SYNC: open the UART listen window
+#define SBP_UCAP_CLOSE_EVT    0x4000  // UCAP_SYNC: close the window (miss if still open)
 
 /*********************************************************************
  * MACROS
