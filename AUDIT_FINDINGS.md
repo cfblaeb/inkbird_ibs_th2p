@@ -44,7 +44,55 @@ In pack_cfg_fmem() the destination pointer is set once (`wraddr = fnewseg + 4;`,
 
 ### 2. [MEDIUM] `bthome_phy6222/SDK/components/driver/uart/uart.c:278` — UART init with tx_pin=GPIO_DUMMY writes OOB garbage into AON PMCTL0 on every wakeup
 
-*Status: unverified · Reachability: shipped build*
+*Status: **CONFIRMED** (code trace, V22) — one defect complex with #4 and #5.*
+
+Verified trace: `set_new_adv_interval()` (thb2_main.c:220) is a non-atomic
+"bounce": it queues `GAP_EndDiscoverable`, then directly fakes
+`gapRole_state = GAPROLE_WAITING_AFTER_TIMEOUT` and counts
+`adv_restart_pending++`, relying on the *next* `GAP_END_DISCOVERABLE_DONE`
+event to consume the marker. Any real GAP event interleaving with that
+in-flight bounce breaks the protocol:
+
+1. **Connect wins the race** (this finding + #4): CONNECT_IND accepted
+   before the adv-disable completes -> `GAP_LINK_ESTABLISHED` processed
+   first: state=CONNECTED, callback zeroes `adv_restart_pending`, locks
+   MOD_USR0, starts the 10 s grab timer. The late `END_DISCOVERABLE_DONE`
+   (status SUCCESS) then falls into the else-branch (thb2_peripheral.c:1143):
+   state := GAPROLE_WAITING + notify -> the app runs the FULL disconnect
+   cleanup **while the connection is live**: MOD_USR0 unlocked (chip sleeps
+   mid-connection — the exact instability the lock exists to prevent),
+   TIMER_BATT_EVT stopped (no measurements during the connection), advert
+   rebuilt, and `wrk.reboot` honored if set. State is left WAITING while
+   actually connected.
+2. **Bounce issued while not advertising** (#5, via KEY_CHANGE ->
+   `increase_advertising_frequency()` during a connection — reachable in the
+   shipped build only through the floating-P07 glitch, finding #8):
+   `GAP_EndDiscoverable` fails -> END_DONE arrives with status != SUCCESS ->
+   handler sets GAPROLE_ERROR *without consuming the pending marker* ->
+   `adv_restart_pending` strands at 1 -> the NEXT real supervision timeout is
+   mistaken for a bounce (thb2_main.c:1180 decrements and skips cleanup) ->
+   the V20 MOD_USR0 sleep-lock leak is back for exactly that disconnect.
+
+Trigger frequency for case 1: the bounce fires one advertising event
+(<=10 s) after EVERY disconnect (`adv_reload_count = 1` in the WAITING
+cleanup -> interval restore at thb2_main.c:412/426) and 60 s after every
+boot (V18 fast window expiry). A client connecting inside that window races
+it — realistic during fleet flashing (connect/disconnect/reconnect cycles)
+and battery-pull + connect workflows. Ordering caveat: LINK_ESTABLISHED
+processing before END_DISCOVERABLE_DONE requires the connection event to
+be queued first; the window is one advertising event, so the race is rare
+per attempt but the attempt count is high over a fleet's life.
+
+Proposed fix (design-level, not yet applied): stop borrowing GAP states.
+`thb2_peripheral.c` is app-owned source — add a dedicated
+`gapRole_AdvRestartReq` flag consumed inside the END_DISCOVERABLE_DONE
+handler (re-enable adv, no fake state, no app notification), and have
+`set_new_adv_interval()` set that flag instead of touching
+`gapRole_state`. This removes the fake-state protocol entirely:
+CONNECTED no longer needs to zero a marker, WAITING_AFTER_TIMEOUT means
+only real supervision timeouts again, and both race arms above become
+impossible by construction. Must also make the END_DONE error path clear
+the flag (case 2).*
 
 The app configures UART0 RX-only with cfg.tx_pin = GPIO_DUMMY (0xFF) in ucap_init (bthome_phy6222/source/cmd_parser.c:263). The driver guards GPIO_DUMMY in hal_gpio_fmux_set (gpio.c:196) but NOT in the hal_gpio_pull_set(pcfg->tx_pin, GPIO_PULL_UP) call at uart.c:278. hal_gpio_pull_set (gpio.c:324-339) has its bounds check compiled out (TEST_PIN_NUM=0) and indexes the 23-entry c_gpio_pull table at [255], reading 3 garbage bytes ~700 bytes past the table in flash rodata; since 255 >= P31 it then executes subWriteReg(&AP_AON->PMCTL0, h, l, 2) with those garbage bit positions. PMCTL0 holds the pull/wakeup-polarity configuration for P31-P34. This runs on every hal_uart_init: at boot, on every listen-window open (ucap_start_grab does deinit+init), and on EVERY wakeup from sleep via the driver's own uart_wakeup_process_0 wakeup handler (uart.c:403-405) — thousands of times per day. The written bits are deterministic per build (the current V22 binary is evidently benign — hardware validated at 10-15 uA), but any relink that moves rodata changes which PMCTL0 bits get smashed.
 
@@ -60,7 +108,7 @@ low_vbat() calls hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15) = 117,964,800 tic
 
 ### 4. [MEDIUM] `bthome_phy6222/source/battery.c:183` — low_vbat 60-minute sleep wraps 24-bit RTC: wakes after ~16 s, not 1 hour
 
-*Status: unverified · Reachability: shipped build*
+*Status: **CONFIRMED** (code trace, V22) — same complex — see #2 for the verified trace and proposed fix (case 1).*
 
 low_vbat() calls hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15) = 117,964,800 ticks, but the PHY6222 RTC counter/comparator is 24-bit (wraps at 16,777,216 ticks = 512 s). config_RTC1 (SDK/lib/rf/patch.c:5609) programs AP_AON->RTCCC0 = sleep_tick + time; only the low 24 bits are meaningful, and 117,964,800 mod 2^24 = 524,288 ticks = 16.0 s. It also enables the counter-overflow wake event (RTCCTL BIT(18)), so even under the alternative 32-bit-compare interpretation the chip wakes at the first RTC wrap (<=512 s). Either way the intended 1-hour low-battery standby is impossible.
 
@@ -68,7 +116,7 @@ low_vbat() calls hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15) = 117,964,800 tic
 
 ### 5. [MEDIUM] `bthome_phy6222/source/battery.c:183` — low_vbat 60-min hibernate truncates to ~16 s in 24-bit RTC comparator: brownout boot-loop
 
-*Status: unverified · Reachability: shipped build*
+*Status: **CONFIRMED** (code trace, V22) — same complex — see #2 for the verified trace and proposed fix (case 2, stranded marker).*
 
 low_vbat() calls hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15) = 117,964,800 ticks intending a 60-minute sleep. hal_pwrmgr_enter_sleep_rtc_reset (SDK pwrmgr.c:471-487) passes this to config_RTC1, which writes AP_AON->RTCCC0 = sleep_tick + time (SDK/lib/rf/patch.c:5609). The RTC counter/comparator is 24-bit (wraps every 512 s), so the effective delta is 117,964,800 mod 2^24 = 524,288 ticks = 16 s. check_battery() (battery.c:190-192, the OTA_TYPE_BOOT branch in the shipped image) invokes low_vbat whenever a measurement reads < 2000 mV.
 
