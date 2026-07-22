@@ -268,7 +268,21 @@ _flash_write_cfg() writes the 4-byte header {size,id} first (line 340) and the p
 
 ### 10. [MEDIUM] `bthome_phy6222/source/thb2_main.c:224` — Bounce/connect race lets END_DISCOVERABLE_DONE unlock MOD_USR0 mid-connection
 
-*Status: unverified · Reachability: shipped build*
+*Status: **CONFIRMED — WON'T FIX** (same reachability class as #1).*
+
+Verified: `_flash_write_cfg()` writes the 4-byte object header
+(`_flash_write_dword(faddr, fobj.x)`, flash_eep.c:340) and only then the
+payload (`_flash_write(faddr+4, len, ptr)`, :344). There is no per-record
+CRC. A power loss between those two flash operations leaves a committed
+header (size/id valid, != 0xFFFFFFFF) followed by erased 0xFF payload, and
+`get_addr_fobj()` will return it as a valid record of that size — so the
+next read yields garbage (or 0xFF-filled) data for that id.
+
+Won't-fix rationale (identical to #1): EEP writes on this device happen
+only on *change*, i.e. essentially once per firmware upgrade, at boot, over
+a window of microseconds between two flash calls. The precondition (power
+loss in that exact window, during the rare write) is not reachable in
+normal operation. Revisit only if runtime config writes are ever added.*
 
 set_new_adv_interval() ignores the result of GAP_EndDiscoverable() and force-fakes gapRole_state = GAPROLE_WAITING_AFTER_TIMEOUT. If a central's CONNECT_IND lands in the window between the bounce issuing GAP_EndDiscoverable and the LL actually disabling advertising (the interval-restore bounce runs exactly once per advertising restart, e.g. at fast-window expiry when users are connecting for OTA), GAP_LINK_ESTABLISHED is processed first: state becomes GAPROLE_CONNECTED, the app locks MOD_USR0 and starts TIMER_BATT. The still-pending GAP_END_DISCOVERABLE_DONE then arrives with state==GAPROLE_CONNECTED, and thb2_peripheral.c:1140-1143 falls into the else branch: it sets gapRole_state = GAPROLE_WAITING and gapRole_AdvEnabled = FALSE and notifies the app. The app's GAPROLE_WAITING cleanup (thb2_main.c:1190-1213) runs while the connection is live: it stops TIMER_BATT_EVT, calls hal_pwrmgr_unlock(MOD_USR0) (line 1195), rebuilds the advert, and would honor wrk.reboot — the same double-purpose-state aliasing family that produced the V20 storm.
 
@@ -276,7 +290,30 @@ set_new_adv_interval() ignores the result of GAP_EndDiscoverable() and force-fak
 
 ### 11. [MEDIUM] `bthome_phy6222/source/thb2_main.c:338` — adv_measure still opens unmanaged UART grab windows under UCAP_SYNC (no close timer)
 
-*Status: unverified · Reachability: shipped build*
+*Status: **CONFIRMED** — bound too loose; LOW reachability (crafted image required).*
+
+Verified: `CMD_OTA_SET` validates the target as
+`program_offset + (pkt_total<<4) <= FADDR_START_ADDR + FLASH_MAX_SIZE`
+(ble_ota.c:155-157). `FLASH_MAX_SIZE` is `0x200000` (2 MB, ble_ota.h:13)
+but the part is 512 KB (`FLASH_BASE_ADDR 0x11000000`, end 0x11080000). So
+the check permits target ranges up to 0x11200000 — well past the physical
+part AND past the EEP config banks at 0x1107C000. A CMD_OTA_SET with a
+crafted/corrupt `program_offset` (>= FADDR_APP_SEC) or oversized
+`pkt_total` therefore passes validation and lets subsequent packet writes
+land on the EEP identity banks or alias past end-of-part.
+
+Reachability is LOW: it requires a malformed OTA control packet, not a
+truncated transfer. The repo's own images (phy62x2_ota.py) always set a
+valid offset, and the pvvx path only commits the PHY6 magic after a full
+CRC32 pass, so an interrupted *legitimate* OTA is already safe (project
+plan). This is hardening against a corrupt/hostile image over an
+authenticated BLE link, not a normal-operation fault.
+
+Fix candidate (bundle with any OTA-path work): define a real
+`FLASH_PART_SIZE 0x80000` and bound-check the top of the writable OTA
+staging region against that (and explicitly exclude the EEP banks at
+`FMEMORY_SCFG_BASE_ADDR`). #21 is the same defect; #19/#20 are the
+non-shipped fix_mac/start_app variants noted separately.*
 
 With UCAP_SYNC, cfg.measure_interval is pinned to 1 (config.c:173) and the design says the sync engine owns all listen windows. But adv_measure's SERVICE_THS branch still calls start_measure() when meas_count == measure_interval-1 == 0 (thb2_main.c:337-338), and GAPROLE_ADVERTISING resets meas_count = 0 on every advertising (re)start (thb2_main.c:1132). start_measure() -> ucap_start_grab() (sensors.c:150-156, cmd_parser.c:297-317) does hal_uart_deinit+init, hal_pwrmgr_lock(MOD_UART0) and sets grab_active=1 — but no SBP_UCAP_CLOSE_EVT is armed (only ucap_sync_open_evt arms one, cmd_parser.c:366-370). The lock is only released by the next good frame ISR (up to one full ~10.4 s main-MCU period away) or when the sync engine's next OPEN event adopts the window. The same unmanaged open happens from GAPROLE_CONNECTED (thb2_main.c:1153) and every 10 s from TIMER_BATT_EVT during a connection (thb2_main.c:860), where the deinit+init can also chop a frame mid-reception.
 
@@ -356,7 +393,7 @@ The first loop in start_app() (lines 273-278) runs `while(i--) if(info_app.start
 
 ### 21. [MEDIUM] `bthome_phy6222/source/cmd_parser.c:961` — fix_mac() erases info sector before rewrite; power cut corrupts chip MAC/trim
 
-*Status: unverified · Reachability: **not in shipped build***
+*Status: **CONFIRMED** — duplicate of #11 (same 2 MB-vs-512 KB bound), see there. Not in shipped build per the finder's own reachability note, but the code path IS compiled; treat with #11.**not in shipped build***
 
 write_fix_mac() (reached via CMD_ID_FIX_MAC in cmd_parser at line 1283) reads the RINFO sector into RAM, then at line 961 calls hal_flash_erase_sector(FLASH_ADDR_RINFO + (phy_flash.Capacity|FLASH_MAX_SIZE)) and only afterwards (lines 962-963) rewrites the 4KB via a 256-byte loop. Between the erase and completion of the write loop the manufacturer/security info page (holding the fixed chip MAC and, on this part, RF calibration/trim accessed through the high remap) is blank. It also temporarily forces phy_flash.Capacity |= 0x200000 and pokes 0x1fff0898, so a fault before the restore at line 964 also leaves the flash-size shadow wrong. No verify-before-erase or journaling.
 
