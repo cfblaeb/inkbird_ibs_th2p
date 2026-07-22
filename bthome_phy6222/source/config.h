@@ -179,8 +179,16 @@
   /* Inkbird IBS-TH2 Plus */
 
 #if OTA_TYPE == OTA_TYPE_BOOT
-#define DEV_SERVICES (OTA_TYPE | SERVICE_THS | SERVICE_KEY)
+// No SERVICE_KEY: the IBSTH2P has no button wired to the PHY6222 (the real
+// button lives on the main MCU and arrives in-band via UART frame byte [8]).
+// SERVICE_KEY used to arm the unconnected "placeholder" pin P07 as an edge
+// interrupt + sleep wake source with no pull configured — any glitch cost a
+// wake plus 60 s of fast advertising, and a glitch during a connection could
+// strand the adv-restart marker (audit findings #8/#5).
+#define DEV_SERVICES (OTA_TYPE | SERVICE_THS)
 #else
+// NOTE: legacy template variant, not shipped and not maintained (SERVICE_SCREEN
+// et al. do not match IBSTH2P hardware); the shipped image is the BOOT variant.
 #define DEV_SERVICES (OTA_TYPE \
 		| SERVICE_SCREEN \
 		| SERVICE_THS \
@@ -216,7 +224,9 @@
 #define ADC_PIN				GPIO_P11
 #define ADC_VBAT_CHL		VBAT_ADC_P11
 
-#define GPIO_KEY	GPIO_P07  // Not really. Just a placeholder.
+#define GPIO_KEY	GPIO_P07  // Not really. Just a placeholder. Unused in the
+                              // shipped build since SERVICE_KEY was dropped
+                              // (audit #8); kept only for the legacy variant.
 #define KEY_PRESSED	0
 
 #define DEF_MODEL_NUMBER_STR		"IBSTH2P"

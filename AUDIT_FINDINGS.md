@@ -191,7 +191,12 @@ write_fix_mac() (reachable via CMD_ID_FIX_MAC, compiled in the shipped OTA_TYPE_
 
 ### 8. [MEDIUM] `bthome_phy6222/source/cmd_parser.c:1026` — CMD_ID_DEVID uses (dev_id_t*)&obuf: writes past pointer var, not into reply buffer
 
-*Status: **CONFIRMED** (code trace, V22) — duplicates: #25, #36.*
+*Status: **CONFIRMED — FIXED**: SERVICE_KEY removed from the shipped
+IBSTH2P DEV_SERVICES (config.h); P07 is no longer registered for
+interrupts or wake (verified absent from a check build's disassembly —
+the only remaining `hal_gpioin_register` match is the SDK's debug string
+table). This also removes the reachable enabler for #5 case 2. Duplicates:
+#25, #36.*
 
 Verified: the shipped build has SERVICE_KEY set, so `init_app_gpio()`
 (thb2_main.c:521) registers GPIO_KEY = P07 — the pin config.h itself calls
@@ -212,8 +217,8 @@ sleep-lock leak on the next supervision timeout (finding #5, case 2). So
 this finding is both a battery risk in itself and the realistic enabler
 for #5.
 
-Mitigating evidence: months of V15..V22 fleet operation without observed
-fast-adv anomalies suggest P07 is quiet in practice on this board. The
+Frequency in the field: unknown — fast-advertising bursts were never
+monitored for, so absence of reports is not evidence of absence. The
 exposure is environmental (EMI, humidity) and per-unit wiring, not
 deterministic.
 
@@ -360,7 +365,7 @@ Under UCAP_SYNC the listen windows are supposed to be owned by ucap_sync_open/cl
 
 ### 25. [LOW] `bthome_phy6222/source/cmd_parser.c:310` — Grab windows opened outside the V21 sync engine hold MOD_UART0 with no close timeout
 
-*Status: **CONFIRMED** — duplicate of #8, see there.*
+*Status: **CONFIRMED — FIXED** — duplicate of #8; SERVICE_KEY removed.*
 
 ucap_start_grab() is still called from three non-sync paths in the shipped UCAP_SYNC build: GAPROLE_CONNECTED (thb2_main.c:1153), the connected TIMER_BATT_EVT 10 s cycle (thb2_main.c:860 via start_measure), and adv_measure's meas_count==(measure_interval-1) branch (thb2_main.c:338, hit once after every GAPROLE_ADVERTISING reset because the callback zeroes meas_count and measure_interval is pinned to 1). Each of these sets grab_active=1 and locks MOD_UART0 but arms no SBP_UCAP_CLOSE_EVT — the sync engine's close handler is armed only by ucap_sync_open_evt. The lock is normally released by the next good frame (<=10.4 s), but if the main MCU stream is silent it stays held until the sync engine's own OPEN->CLOSE cycle happens to sweep it, which in the 6-miss backoff state is up to 300 s + a full-period window later. These paths also hal_uart_deinit/init (lines 310-311) at times uncorrelated with the frame phase, killing any frame that is mid-reception (13.5 ms of every ~10.4 s), which the sync engine counts as a miss and answers by widening its guard.
 
@@ -448,7 +453,7 @@ config.h:219 defines GPIO_KEY as GPIO_P07 with the comment 'Not really. Just a p
 
 ### 36. [LOW] `bthome_phy6222/source/thb2_main.c:521` — SERVICE_KEY arms placeholder pin P07 as IRQ+wake source; glitch triggers 60 s fast adv
 
-*Status: **CONFIRMED** — duplicate of #8, see there.*
+*Status: **CONFIRMED — FIXED** — duplicate of #8; SERVICE_KEY removed.*
 
 The shipped BOOT build keeps SERVICE_KEY (config.h:182) with GPIO_KEY = GPIO_P07 explicitly marked 'Not really. Just a placeholder.' (config.h:219). init_app_gpio (thb2_main.c:521) calls hal_gpioin_register(GPIO_P07, ...), making P07 an edge-interrupt input, and the SDK's hal_gpio_sleep_handler (gpio.c:524-559) then automatically configures every GPIO_PIN_ASSI_IN pin — including P07 — as an AON wake source with polarity opposite its current level. P07 is only weak-pulled-down (main.c:396). With KEY_PRESSED=0, the idle level 0 reads as 'pressed'; the KEY_CHANGE_EVT key-up path (thb2_main.c:1038, no SERVICE_SCREEN) calls increase_advertising_frequency() -> 60 s reload count and set_new_adv_interval(DEF_CON_ADV_INTERVAL).
 
