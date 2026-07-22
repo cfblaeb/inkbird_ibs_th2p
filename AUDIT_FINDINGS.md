@@ -321,7 +321,33 @@ With UCAP_SYNC, cfg.measure_interval is pinned to 1 (config.c:173) and the desig
 
 ### 12. [MEDIUM] `bthome_phy6222/source/thb2_main.c:521` — SERVICE_KEY edge-IRQ + sleep-wake armed on placeholder pin P07 in shipped image
 
-*Status: unverified · Reachability: shipped build*
+*Status: **PARTIALLY REFUTED / CONFIRMED-minor** — finder mislabeled the target and consequence; LOW, effectively won't-fix.*
+
+Two claims in the finding are wrong on inspection:
+1. "erases physical flash sector 0 in place" — NO. `write_fix_mac()`
+   (cmd_parser.c:952) *reads* sector 0 (FLASH_ADDR_RINFO = 0x11000000) into
+   a RAM buffer, patches the MAC field, then erases and writes the MIRROR
+   info sector at `FLASH_ADDR_RINFO + (phy_flash.Capacity | FLASH_MAX_SIZE)`
+   — the PHY62xx hidden factory-info page reached via the 0x200000 capacity-
+   register trick (`*0x1fff0898`). Main sector 0 (the live boot info) is
+   never erased.
+2. "bricks device" — NO. The mirror page holds only the redundant chip MAC.
+   If a power cut corrupts it, `set_mac()` (thb2_main.c:164-172) falls back:
+   EEP MAC -> read_chip_mAddr -> random Tuya-prefixed MAC. A corrupt mirror
+   MAC degrades to a possibly-different MAC, not a brick.
+
+What IS real: the erase-then-write of that mirror sector is non-atomic and
+uncrc'd (same class as #10), so a power cut mid-write corrupts the factory
+MAC region. But reachability is LOW-and-manual: `CMD_ID_FIX_MAC` (0x11) is a
+deliberate provisioning/debug command over the CMD characteristic; nothing
+in normal operation or the repo tooling sends it, and `fix_mac()` early-
+returns if the fixed MAC already matches. Net: a manual command with a
+self-healing failure mode. No fix planned; documented so the header comment
+("переписывает сектор 0x0 Flash") is understood to be imprecise.
+
+#20 is the same code; the finder's shipped/not-shipped split between #12 and
+#20 is spurious — fix_mac() is compiled in the shipped BOOT build (guarded
+by OTA_TYPE==OTA_TYPE_BOOT) and identical in both entries.*
 
 The shipped BOOT_OTA build has SERVICE_KEY in DEV_SERVICES (config.h:182), and config.h:219 defines GPIO_KEY as GPIO_P07 with the comment 'Not really. Just a placeholder.' — the IBS-TH2 Plus button is wired to the main MCU, not the PHY. init_app_gpio() (thb2_main.c:521) nevertheless calls hal_gpioin_register(GPIO_P07, ...) with both-edge handlers; hal_gpioin_enable leaves the pin at default pull (the pull_set call in the SDK is commented out, SDK gpio.c:639) and hal_gpio_sleep_handler arms it as a sleep wakeup source. Every edge on P07 wakes the chip and fires KEY_CHANGE_EVT; the key-up branch (thb2_main.c:1038) calls increase_advertising_frequency(), which drops the advertising interval to DEF_CON_ADV_INTERVAL (1.56 s) for 60 s and runs a stop/restart bounce.
 
@@ -385,7 +411,7 @@ The CMD_OTA_SET handler validates program_offset with `ota.program_offset + (ota
 
 ### 20. [MEDIUM] `bthome_phy6222/source/ble_ota.c:277` — start_app() reads uninitialized info_seg.waddr when image start_addr is 0xFFFFFFFF
 
-*Status: unverified · Reachability: **not in shipped build***
+*Status: **CONFIRMED-minor** — duplicate of #12 (fix_mac atomicity); see #12. The 'not in shipped build' tag is wrong: fix_mac is in the BOOT build.**not in shipped build***
 
 The first loop in start_app() (lines 273-278) runs `while(i--) if(info_app.start_addr == 0xffffffff) info_app.start_addr = info_seg.waddr;` BEFORE any spif_read of info_seg — info_seg is uninitialized stack garbage at that point. The image-header format explicitly supports start_addr = -1 ('taken from the first segment != -1' per the struct comment, and the second loop at line 285 contains the correct late assignment, which the garbage from the first loop pre-empts). On IBSTH2P this code runs on EVERY boot (main.c:557 always-boot path) whenever a START_UP_FLAG image is staged at 0x10000. The project's own phy62x2_ota.py always writes an explicit start address, so fleet images do not hit it, but any pvvx-format image using the documented -1 convention does. (Inherited unchanged from pvvx/THB2 upstream.)
 
