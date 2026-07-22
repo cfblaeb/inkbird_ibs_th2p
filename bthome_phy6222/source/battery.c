@@ -159,42 +159,17 @@ static void init_adc_batt(void) {
 #endif
 }
 
-void low_vbat(void) {
-#if (DEV_SERVICES & SERVICE_SCREEN)
-    power_off_lcd();
-#endif
-#if (DEV_SERVICES & SERVICE_THS)
-    power_off_sensor();
-#endif
-#ifdef GPIO_SPWR  // питание сенсора CHT8305_VDD
-	hal_gpio_pull_set(GPIO_SPWR, GPIO_FLOATING);
-	hal_gpio_pull_set(I2C_SDA, GPIO_FLOATING);
-	hal_gpio_pull_set(I2C_SCL, GPIO_FLOATING);
-	hal_gpio_write(GPIO_SPWR, 0);
-#endif
-#ifdef GPIO_LPWR // питание LCD драйвера
-	hal_gpio_pull_set(GPIO_LPWR, GPIO_FLOATING);
-	hal_gpio_write(GPIO_LPWR, 0);
-#endif
-#ifdef GPIO_LED
-	hal_gpio_write(GPIO_LED, LED_OFF);
-#endif
-    // 1.67 uA at 3.0V
-    hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15); // 60 minutes
-}
-
+// The upstream low_vbat() low-battery hibernate was removed here (audit
+// finding #3): its (60*60)<<15 tick sleep overflowed the 24-bit AON RTC
+// comparator and actually woke the chip every 16 s, turning end-of-life
+// into a fast-advertising reboot loop. Owner decision: rather than fix the
+// arithmetic, drop the mechanism entirely — the device simply runs until
+// the battery dies. Accepted trade-offs: no OTA lockout on a dying battery
+// and an unmanaged brownout at the very end, in exchange for simpler code.
 
 void check_battery(void) {
 	if(bat_average.battery_mv == 0)
 		return;
-#if defined(OTA_TYPE) && OTA_TYPE == OTA_TYPE_BOOT
-	if (bat_average.battery_mv < 2000) // It is not recommended to write Flash below 2V
-		low_vbat();
-#else
-	if (bat_average.battery_mv < 1900)
-		low_vbat();
-#endif
-
 	bat_average.summ += bat_average.battery_mv;
 	bat_average.count++;
 

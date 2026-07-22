@@ -100,7 +100,9 @@ The app configures UART0 RX-only with cfg.tx_pin = GPIO_DUMMY (0xFF) in ucap_ini
 
 ### 3. [MEDIUM] `bthome_phy6222/source/battery.c:183` — low_vbat 60-min sleep tick overflows 24-bit RTC comparator (wakes every 16 s)
 
-*Status: **CONFIRMED** (arithmetic + SDK trace) — duplicates: #7, #14.*
+*Status: **CONFIRMED — FIXED by removal** (owner decision): `low_vbat()` and its trigger deleted from battery.c — the device now simply runs until the battery dies. Rationale: the hibernate added complexity for little gain; accepted trade-offs (noisy brownout end-of-life, no OTA lockout on dying batteries) are documented at the removal site.*
+
+*Original verification (arithmetic + SDK trace) — duplicates: #7, #14:*
 
 Verified: `low_vbat()` (battery.c:183) requests
 `hal_pwrmgr_enter_sleep_rtc_reset((60*60)<<15)` = 117,964,800 ticks. The SDK
@@ -164,7 +166,7 @@ CMD_OTA_SET validates `program_offset + (pkt_total << 4) <= FADDR_START_ADDR + F
 
 ### 7. [MEDIUM] `bthome_phy6222/source/cmd_parser.c:961` — CMD_ID_FIX_MAC erases physical flash sector 0 in place; power loss in window bricks device
 
-*Status: **CONFIRMED** — duplicate of #3, see there for the verified analysis and fix candidate.*
+*Status: **CONFIRMED — FIXED by removal** — duplicate of #3; low_vbat() deleted entirely.*
 
 write_fix_mac() (reachable via CMD_ID_FIX_MAC, compiled in the shipped OTA_TYPE_BOOT build, cmd_parser.c:1283) reads physical sector 0 into a 4 KB stack buffer, then erases it via the address-wrap trick (`hal_flash_erase_sector(FLASH_ADDR_RINFO + phy_flash.Capacity)` with Capacity |= 2 MB wraps to physical 0x00000 on the 512 KB die) and rewrites it in sixteen 256-byte chunks (lines 961-963). Sector 0 holds the PHY6222 ROM boot information (partition table, chip MAC area at 0x900). There is no staging copy: between the erase and the last chunk write the only copy of the boot sector is in RAM.
 
@@ -220,7 +222,7 @@ During a connection the IBSTH2P TIMER_BATT_EVT handler unconditionally rearms it
 
 ### 14. [MEDIUM] `bthome_phy6222/source/thb2_main.c:1180` — Stranded adv_restart_pending eats a real supervision timeout, re-leaking MOD_USR0
 
-*Status: **CONFIRMED** — duplicate of #3, see there for the verified analysis and fix candidate.*
+*Status: **CONFIRMED — FIXED by removal** — duplicate of #3; low_vbat() deleted entirely.*
 
 adv_restart_pending is incremented unconditionally in set_new_adv_interval() (line 223) but is only decremented when the fake GAPROLE_WAITING_AFTER_TIMEOUT notification actually arrives, and only reset on GAPROLE_CONNECTED. If the bounce's GAP_EndDiscoverable fails (return value ignored, no DONE event ever posted) or END_DISCOVERABLE_DONE completes with status != SUCCESS (thb2_peripheral.c:1147-1152 then notifies GAPROLE_ERROR, which the app callback merely logs), the counter is stranded at 1 with no connection to clear it. The next REAL supervision timeout is then consumed by the `if (adv_restart_pending) { adv_restart_pending--; break; }` guard, skipping the entire disconnect cleanup including hal_pwrmgr_unlock(MOD_USR0) at line 1195.
 
