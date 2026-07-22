@@ -11,3 +11,4 @@ inkbird_fw/build/stock_bundle_installer/*.elf
 inkbird_fw/build/stock_bundle_installer/*.map
 inkbird_fw/build/stock_bundle_installer/*.asm
 inkbird_fw/build/stock_bundle_installer/*.bin
+/private/
