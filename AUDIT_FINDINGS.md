@@ -21,7 +21,22 @@ Duplicate clusters (same underlying issue reported by several finders):
 
 ### 1. [HIGH] `bthome_phy6222/source/flash_eep.c:273` — EEP compaction never advances wraddr: every repack overlap-corrupts all stored objects
 
-*Status: **CONFIRMED** (host-side repro: `bthome_phy6222/tests/test_flash_eep.c` — after 2 pack cycles MAC/version/name are destroyed; fix candidate `wraddr += cplen` after each copied record validated by the same test). Upstream pvvx code, unmodified since import — affects the whole THB2 family; worth reporting upstream. Reachability: pack triggers only after ~4 KB of accumulated *changed* config writes (~250 cfg saves or a mix of upgrades/name changes) — long fuse, dev/bench units at highest risk. Not yet fixed in source · Reachability: shipped build*
+*Status: **CONFIRMED — WON'T FIX** · Verified 2026-07-22*
+
+Verification: host-side repro `bthome_phy6222/tests/test_flash_eep.c` —
+`pack_cfg_fmem()` never advances `wraddr`, so bank compaction writes every
+surviving object to the same address (NOR AND-semantics), destroying
+MAC/version/name; a two-line fix (`wraddr += cplen`) passes the same test.
+The test stays in the tree as documentation of the analysis.
+
+Won't-fix rationale (this device, this repo): the EEP area stores only
+identity + settings, appended only on *change*. IBSTH2P write census:
+~3 records at first boot (MAC 12 B, name stub 4 B, version 8 B) plus one
+8-byte version record per firmware upgrade. Settings are hard-pinned in
+`test_config()` and never changed over BLE in this deployment, so the
+4092-byte bank fills after ~500 firmware upgrades — compaction is
+effectively unreachable for the life of the hardware. If a future feature
+ever starts writing config records at runtime, revisit this first.*changed* config writes (~250 cfg saves or a mix of upgrades/name changes) — long fuse, dev/bench units at highest risk. Not yet fixed in source · Reachability: shipped build*
 
 In pack_cfg_fmem() the destination pointer is set once (`wraddr = fnewseg + 4;`, line 257) and never incremented after `_flash_write(wraddr, len, pbuf)` (line 273). Every surviving object (EEP_ID_VER, EEP_ID_MAC, EEP_ID_DVN, EEP_ID_CFS, ...) is written to the SAME flash address in the new bank; NOR writes AND bits together, so the second copy corrupts the first's header and data, and the merged garbage header derails all subsequent traversal (get_addr_fobj / get_addr_fobj_save walk AND'd data as headers). This bug was introduced in the THB2 port: pvvx's earlier ATC_MiThermometer flash_eep.c advances the write pointer (`wraddr += ...` after each copy, verified against upstream); pvvx/THB2 master carries the same regression, so it is inherited, not local. Compaction triggers when the 4 KB bank fills — roughly 250 config/name writes (each changed CMD_ID_CFG save is a 16-byte record) — so it is guaranteed to fire eventually on any unit whose settings are ever changed, e.g. via CMD_ID_DNAME fleet naming or CMD_ID_EEP_RW debugging.
 
