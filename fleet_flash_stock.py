@@ -44,7 +44,7 @@ PHY_SERVICE = "0000fcd2-0000-1000-8000-00805f9b34fb"
 SW_REV = "00002a28-0000-1000-8000-00805f9b34fb"
 
 DEFAULT_BUNDLE = Path(__file__).parent / "inkbird_fw" / \
-    "STAGE3_IBSTH2P_v22_stock_bundle_installer.hex16"
+    "STAGE3_IBSTH2P_v23_stock_bundle_installer.hex16"
 
 ERR_NAMES = {  # pplusErrorName() in InkbirdOTA.html
     0x01: "verify error", 0x02: "unknown command", 0x03: "not in OTA mode",
@@ -117,7 +117,7 @@ async def mode_switch(stock_addr):
         uuids = [s.uuid for s in client.services]
         if PHY_SERVICE in uuids:
             raise RuntimeError("device runs CUSTOM firmware — use the pvvx "
-                               "path (flash_v22 OTA bin), not the stock path")
+                               "path (fleet_flash_custom.py), not the stock path")
         if SHB_SERVICE not in uuids:
             raise RuntimeError("no stock SHB OTA service — wrong device?")
         chars = [c.uuid for s in client.services if s.uuid == SHB_SERVICE
@@ -276,7 +276,7 @@ async def main():
     await shb_upload(ota_addr, parts)
 
     addr, name, rev = await watch_new_custom(known)
-    ok = "V22" in rev
+    ok = "V23" in rev
     log(f"=== {'SUCCESS' if ok else 'CHECK NEEDED'}: {stock_addr} -> {addr} "
         f"({name}), revision {rev} ===")
     mapping = {"stock_addr": stock_addr, "new_addr": addr, "new_name": name,
