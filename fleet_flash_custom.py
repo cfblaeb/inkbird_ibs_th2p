@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pvvx-path fleet flasher: upgrade a custom-firmware IBSTH2P to V22.
+"""pvvx-path fleet flasher: upgrade a custom-firmware IBSTH2P to V23.
 
 For devices already on custom firmware (38:1F:8D:* BTHome). Their address
 does NOT change across the flash, so HA identity is untouched.
@@ -18,7 +18,7 @@ from pathlib import Path
 from bleak import BleakClient
 
 REPO = Path(__file__).parent
-OTA_BIN = REPO / "inkbird_fw" / "BOOT_IBSTH2P_v22_ota.bin"
+OTA_BIN = REPO / "inkbird_fw" / "BOOT_IBSTH2P_v23_ota.bin"
 SW_REV_CHAR = "00002a28-0000-1000-8000-00805f9b34fb"
 
 ADDR = sys.argv[1].upper() if len(sys.argv) > 1 else ""
@@ -77,7 +77,7 @@ async def main():
     try:
         rev = (await client.read_gatt_char(SW_REV_CHAR)).decode()
         print(f"post-flash Software Revision: {rev} "
-              f"{'— V22 CONFIRMED' if 'V22' in rev else '— UNEXPECTED!'}",
+              f"{'— V23 CONFIRMED' if 'V23' in rev else '— UNEXPECTED!'}",
               flush=True)
     finally:
         try:

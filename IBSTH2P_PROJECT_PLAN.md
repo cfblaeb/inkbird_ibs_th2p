@@ -740,8 +740,36 @@ raw-HCI harness from the laptop; log: scratchpad v23_conn_test.py):
 4. ~~Connect/disconnect cycling (10x) — no stuck advertising, no fast-adv
    storm.~~ PASS — 10/10 connects succeeded, advertising resumed at 10 s
    after every disconnect, zero sub-2 s gaps (no storm).
-5. Fleet-flash one stock unit with the updated fleet_flash_stock.py and
-   verify the mapping line pairs the right addresses. (Still open.)
+5. ~~Fleet-flash one stock unit with the updated fleet_flash_stock.py and
+   verify the mapping line pairs the right addresses.~~ PASS — first
+   room-205 unit (2026-07-23, see roll-out below): stale-PPlusOTA
+   pre-scan clean, 25 s identity snapshot seeded 6 addrs from the
+   mapping file, flash end-to-end in ~83 s, mapping line correct.
+
+### Room 205 roll-out (2026-07-23): fleet COMPLETE
+
+All four room-205 units flashed to V23 via `fleet_flash_stock.py`
+(defaults now point at the v23 bundle; `fleet_flash_custom.py` likewise
+updated to the v23 OTA bin). Every unit verified on air: `IBS-V23`
+revision, BTHome fw 23.0.0, clean 10 s packet cadence, sane temperature,
+100% battery.
+
+| Appliance | stock -> new | temp at verify |
+|---|---|---|
+| Liebherr fridge (was live) | 49:24:06:18:11:A0 -> 38:1F:8D:A9:B5:73 | 5.6 C |
+| Thermo ES freezer | 49:24:06:18:12:A9 -> 38:1F:8D:17:9B:AF | -20.9 C |
+| Gram rf210 freezer | 49:24:06:18:17:BB -> 38:1F:8D:F4:48:46 | -23.3 C |
+| Scandomestic fridge | 49:24:06:18:15:2E -> 38:1F:8D:01:52:4F | 14.8 C (just handled; cooling) |
+
+Three units got fresh batteries (were dead). Physical check settled a
+records conflict: the sensor ex-12:A9 sits on the **Thermo ES** and
+ex-17:BB on the **Gram** — one downstream record set had those two
+swapped (now corrected). Downstream consumers were rebound to the new
+addresses per the mapping file, with the freezer/fridge temperature
+sanity check applied before renames were trusted (one fridge probe read
+14+ C from being handled during the battery swap; its rebind waited for
+cool-down). Fleet total: 16 custom units (12x V22, 4x V23) +
+2 blocklisted stock IBS-TH; ~~20-device~~ roll-out done.
 
 ## Button responsiveness options (V21 candidates, 2026-07-21)
 
