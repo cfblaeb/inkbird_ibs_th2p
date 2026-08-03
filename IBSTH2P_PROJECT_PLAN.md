@@ -820,6 +820,58 @@ the connection collapse into a single press event fired after disconnect.
    wake-on-RX. Turns future fleet upgrades into "walk around clicking
    buttons". (Phones and ESP32 proxies connect without this — the 4 s
    create-connection limit is Linux-kernel-specific.)
+7. Investigate the field-observed **double button event** (2026-08-03, unit
+   8F03 = B225-R219 large freezer, running V22). One press at ~09:06:20 UTC
+   (Pi1 time, NTP-true; laebpi2 was −2 min; cross-checked against
+   google/cloudflare/dtu.dk Date headers after the first reference machine
+   turned out to be +2 min fast). laebpi2, same room, RSSI −72: exactly one
+   event, correct. laebpi1, through walls at RSSI −94: TWO events ~3.5 min
+   apart, the second coincident to the second with a battery+voltage entity
+   update. Note for the analysis: V22 is a wake-on-RX build whose packet id
+   advances every ~10 s outside button bursts, so HA-side dedup semantics
+   differ from the V17-era 5-min-grab description. Competing hypotheses:
+   (a) firmware re-emits the 0x3A button object under a fresh packet id
+   after the button burst ends — but then laebpi2 should also have fired
+   twice, and it didn't;
+   (b) receiver/HA-side duplicate at marginal RSSI (e.g. stale-advertisement
+   replay on source switching in HA's bluetooth stack).
+   Decisive test: run `bthome_monitor.py` next to the unit, press once, and
+   log packet ids/payloads for ~10 min. If the radio never carries a second
+   button object, it's (b) and not a firmware bug.
+8. **Fleet battery drain is 10-20× the wake-on-RX design estimate** (fleet
+   voltage analysis 2026-08-03, HA long-term statistics: 59 days on two
+   veteran units, ~12 days fleet-wide, 15 custom units). V21's design says
+   ~10-20 µA average and the bench meter confirmed 10-15 µA idle — that is
+   6-12 *years* on 2×AAA. The deployed fleet instead shows −2…−28 mV/day,
+   which is roughly 100-300 µA average. Something systematic eats power in
+   the field that the bench soak didn't capture. Candidates, in rough
+   order: connection dwell under the `MOD_USR0` full-awake lock (Next Work
+   item 2 — do the HA Pis or their Bluetooth stacks periodically connect,
+   e.g. for GATT device info?), `RF_PHY_TX_POWER_MAX`, V23's 1 s
+   GAP_MakeDiscoverable retry looping in poor RF, or battery-history
+   confounds (several units were flashed ex-stock 2026-07-23 on
+   already-used cells). Observed life on 2×AAA alkaline:
+   - V22, battery outside the appliance ("external" probe units): −2…−8
+     mV/day → ~4-7 months.
+   - V22, battery inside a fridge (2-8 °C): −2…−8 mV/day → ~3-6 months.
+   - V22, battery inside a −20 °C freezer: −8…−20 mV/day → ~1.5-3 months
+     (worst combination; use lithium L91/L92 there — no cold penalty,
+     projects 8-14 months anywhere).
+   - V23, ANY placement (all four deployed units, incl. room-temp external
+     batteries): −9…−28 mV/day → ~1.5-3 months, i.e. 2-3× V22 despite
+     nominally power-neutral-or-better changes. Placement-independence
+     rules out cold. Caveat: the V23 units are the 2026-07-23 ex-stock
+     flashes, so cell history is a confound — swap one V23 unit to fresh
+     cells and re-measure before hunting a firmware regression.
+   - Empirical brownout/dropout thresholds (pack voltage): ~2.1-2.2 V with
+     the battery warm, ~2.3 V battery-in-fridge, ~2.5 V battery-in-freezer.
+     The 2026-07-26 offline-alarm flood was unit 8387 (B225-204-RE1,
+     internal battery) flapping at 2.1-2.3 V, bottoming at 2.12 V before
+     replacement 2026-08-03 — likely the deliberate old-battery drain
+     experiment from the V22 roll-out notes, now concluded.
+   - Baseline: the two stock-firmware units (12B2/14D7, external alkaline)
+     have never had a battery change — consumption, not hardware, burns
+     the batteries. Supersedes/informs item 1 (V16+ vs V15 measurement).
 
 ## Historical Note
 
