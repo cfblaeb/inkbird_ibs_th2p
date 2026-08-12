@@ -900,6 +900,23 @@ the connection collapse into a single press event fired after disconnect.
    - Baseline: the two stock-firmware units (12B2/14D7, external alkaline)
      have never had a battery change — consumption, not hardware, burns
      the batteries. Supersedes/informs item 1 (V16+ vs V15 measurement).
+9. **V24 must-fix: self-recovery watchdog — first field hang of V23**
+   (B224_R205_Liebherr, chip addr …B5:73, flashed ex-stock 2026-07-23).
+   Stopped advertising 2026-08-09 ~09:58 UTC after 17 days of uptime; last
+   reported voltage 3.227 V (full), main MCU/display still fine on physical
+   inspection, so the PHY6222 side is wedged. The offline alarm caught it
+   (1 h unavailable rule); the other three V23 units were healthy at day 20.
+   Nothing on-device can recover it — recovery is a battery pull. For V24:
+   (a) enable the PHY6222 hardware watchdog, and/or an adv-alive self-check
+   (no advertising event completed for N minutes → reboot); (b) fold in the
+   stuck-connection watchdog from item 2. Suspects for the hang, overlapping
+   item 8's drain candidates: connection dwell that never exits, the V23 1 s
+   GAP_MakeDiscoverable retry path wedging in poor RF, or a plain hard
+   fault. Diagnostics before the battery pull, if the chance arises: a
+   close-range `bthome_monitor.py` capture to distinguish true radio
+   silence from malformed-but-present advertising, and one connect attempt.
+   Record uptime-at-death for any repeat — a second V23 hang makes this a
+   pattern, not a one-off.
 
 ## Historical Note
 
