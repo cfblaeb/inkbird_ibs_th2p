@@ -906,7 +906,11 @@ the connection collapse into a single press event fired after disconnect.
    reported voltage 3.227 V (full), main MCU/display still fine on physical
    inspection, so the PHY6222 side is wedged. The offline alarm caught it
    (1 h unavailable rule); the other three V23 units were healthy at day 20.
-   Nothing on-device can recover it — recovery is a battery pull. For V24:
+   Nothing on-device can recover it — recovery is a battery pull, confirmed
+   2026-08-13: owner pulled the battery and the unit resumed transmitting
+   immediately (total outage ~4 days; no pre-pull radio capture was taken,
+   so silent-vs-malformed remains unknown for this first occurrence).
+   For V24:
    (a) enable the PHY6222 hardware watchdog, and/or an adv-alive self-check
    (no advertising event completed for N minutes → reboot); (b) fold in the
    stuck-connection watchdog from item 2. Suspects for the hang, overlapping
