@@ -913,14 +913,50 @@ the connection collapse into a single press event fired after disconnect.
    For V24:
    (a) enable the PHY6222 hardware watchdog, and/or an adv-alive self-check
    (no advertising event completed for N minutes → reboot); (b) fold in the
-   stuck-connection watchdog from item 2. Suspects for the hang, overlapping
+   stuck-connection watchdog from item 2; (c) consider making the device
+   non-connectable outside the fast windows (reset/button, cf. item 6) —
+   see trigger hypothesis below. Suspects for the hang, overlapping
    item 8's drain candidates: connection dwell that never exits, the V23 1 s
    GAP_MakeDiscoverable retry path wedging in poor RF, or a plain hard
-   fault. Diagnostics before the battery pull, if the chance arises: a
-   close-range `bthome_monitor.py` capture to distinguish true radio
-   silence from malformed-but-present advertising, and one connect attempt.
-   Record uptime-at-death for any repeat — a second V23 hang makes this a
-   pattern, not a one-off.
+   fault.
+
+   **2026-08-17 second wave — hang is firmware-agnostic and burns battery.**
+   Two more hangs, both diagnosed on site with close-range captures BEFORE
+   the battery pull:
+   - B225-R120-FR2 (V22!, …4C:C0:0F): silent from 2026-08-14 ~17:00 UTC,
+     ~64 h. First V22 hang → the defect lives in code shared by V22/V23,
+     not in V23's connection redesign alone.
+   - B224_R205_Liebherr (V23): hang #2 from 2026-08-16 ~00:40 UTC, ~32 h,
+     only 3 days after recovery from hang #1. Unit sits at room temp
+     (probe-in-fridge), battery near full.
+   Radio signature (both units): TRUE radio silence — 0 advertisements over
+   minutes of close-range active scanning and repeated button presses,
+   while 5-7 other fleet units in earshot streamed normally. Not
+   malformed-adv, not a receiver/decode problem. No connect attempt is
+   possible in this state (nothing advertises), so the sudo raw-HCI tool is
+   irrelevant here.
+   Voltage fingerprint (hourly long-term statistics + first post-reboot
+   frames): units enter hangs at HEALTHY voltages (2.964 / 3.165 / 3.224 V
+   — brownout ruled out; pre-hang drain a normal −4 mV/day) and exit them
+   ~110-125 mV/day lighter (R120-FR2 2.964→2.671 over 64 h; Liebherr #2
+   3.165→3.00 over 32 h; Liebherr #1 3.224→3.06). That is ~1-3 mA
+   continuous — the MOD_USR0 full-awake current — i.e. the hang state is
+   the chip wedged fully awake with TX never scheduled. Plausibly item 8's
+   fleet-wide 10-20× drain anomaly is the same defect in episodic,
+   self-recovering form; the latched hangs are its visible tail.
+   Trigger hypothesis (owner, 2026-08-17): an external central (receiver
+   Pi's BlueZ stack, a phone, etc.) connects to the always-connectable
+   device — e.g. an automatic GATT device-info read — and the connection
+   never tears down cleanly, parking the chip in the full-awake dwell
+   state. Testable: pull the receivers' BlueZ/btmon logs around the three
+   known hang-start times (08-09 ~09:58, 08-14 ~17:00, 08-16 ~00:40 UTC).
+   Mitigation = (c) above.
+   Recovery both times: battery pull → clean 60 s fast window (~1.5 s
+   adv interval) → normal 10 s cadence; button event verified working
+   post-reboot (single 0x3A event on air and in the receiver). Uptimes at
+   death so far: Liebherr 17 d (V23 #1), 3 d (V23 #2); R120-FR2 ~22 d
+   (V22). R120-FR2's battery is now at 2.67 V — swap soon (lithium if the
+   pack lives inside the freezer).
 
 ## Historical Note
 
