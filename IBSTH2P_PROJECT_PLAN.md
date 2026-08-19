@@ -951,12 +951,136 @@ the connection collapse into a single press event fired after disconnect.
    state. Testable: pull the receivers' BlueZ/btmon logs around the three
    known hang-start times (08-09 ~09:58, 08-14 ~17:00, 08-16 ~00:40 UTC).
    Mitigation = (c) above.
+   **Log check DONE 2026-08-17 (receiver journals via the supervisor
+   host-logs API, horizon 08-11, covers hangs #2 and #3): the receivers
+   are exonerated.** Their only outgoing BLE connects happen at HA-core
+   startup, on the main receiver only, targeting the two stock gen-1
+   units — never the custom fleet. Both journals are silent at both
+   covered hang moments; receiver restarts (08-11, 08-17) don't
+   correlate with hangs either. Hypothesis downgraded: remaining
+   suspects are non-receiver centrals (a phone running the Inkbird app
+   would try to connect to anything named IBSTH2P-*) or no central at
+   all — an LL/advertising state-machine bug, e.g. SCAN_REQ handling
+   under the receivers' continuous active scanning, which would wedge
+   the chip with nothing in any log. For V25 this demotes
+   non-connectable steady state (c) and favors a cheap connection
+   deadline (peripheral drops any connection older than ~5 min) plus
+   root-causing the LL wedge; the V24 watchdog covers recovery in all
+   variants meanwhile.
    Recovery both times: battery pull → clean 60 s fast window (~1.5 s
    adv interval) → normal 10 s cadence; button event verified working
    post-reboot (single 0x3A event on air and in the receiver). Uptimes at
    death so far: Liebherr 17 d (V23 #1), 3 d (V23 #2); R120-FR2 ~22 d
    (V22). R120-FR2's battery is now at 2.67 V — swap soon (lithium if the
    pack lives inside the freezer).
+
+   **V24 BUILT AND ON THE LIEBHERR (2026-08-17).** Implementation of (a)+(b)
+   in one mechanism: `watchdog_config(WDG_64S)` enabled for IBSTH2P in
+   main.c (the old `DEVICE != DEVICE_IBSTH2P` exclusion dated from
+   conservative March bring-up, no hardware reason); fed from (1) the
+   `ADV_BROADCAST_EVT` handler in thb2_main.c — the controller posts this
+   only when an advertising event actually completed on air, so
+   "advertising alive" is the survival condition — and (2)
+   `simpleProfile_WriteAttrCB` in sbp_profile.c so an OTA/GATT client
+   can't be starved into a reset; (3) the SDK re-arms+feeds on every
+   sleep-wake (`wakeup_init1` → `__wdt_init`). A full-awake radio-dead
+   wedge feeds nothing → hardware reset ≤64 s. Item (c)
+   (non-connectable steady state) deferred to V25 pending the btmon
+   trigger check. Built with the re-verified pinned toolchain (recipe
+   reproduced committed V23 byte-exact first). Bench-validated ON the
+   Liebherr itself (it is the best hang reproducer): two OTA passes, the
+   second transferred entirely under the armed watchdog (>2 min
+   connection + flash writes, no spurious reset); fw 24.0.0 + IBS-V24
+   confirmed by GATT and on air, clean 10 s cadence. Soak protocol: the
+   device UTC clock zeroed at the final reboot 2026-08-17T10:56Z and
+   nothing sets it — a later GATT `CMD_ID_UTC_TIME` read equal to
+   elapsed-time-since-flash proves zero watchdog resets in between;
+   a small value means a reset happened (investigate before fleet
+   roll-out). Fleet stays V22/V23 until that spot check passes after
+   ≥1 day. The recurring Liebherr hang itself is now the live test: on
+   V24 it should self-clear in ≤64 s (an HA blip, not an outage).
+
+   **2026-08-19 hang #4 — R120-FR2 again, only ~29 h after recovery;
+   unit recovered onto V24.**
+   - B225-R120-FR2 (V22, …4C:C0:0F): silent from 2026-08-18 ~14:00 UTC
+     (receiver marked it unavailable 14:10:52Z). Entered at 2.741 V,
+     freezer probe steady at −21 °C, normal flat drain since the 08-17
+     recovery — brownout ruled out a fourth time. Uptime at death ~29 h.
+     Repeat hangs arrive much faster than first hangs (Liebherr 17 d →
+     3 d; this unit 22 d → 29 h) — consistent with a persistent local
+     re-trigger (nearby central? RF environment?) rather than a uniform
+     random hazard.
+   - Pre-pull capture (laptop in the room, bleak active scan): TRUE
+     radio silence — 0 advertisements over 4.5 min including button
+     presses, while 7 fleet units in earshot streamed at −72…−94 dBm.
+     Same signature as hangs #2/#3. Display/main MCU fine as always.
+   - Recovery 2026-08-19 ~07:04:30 UTC: battery pull; the same aged
+     cells went back in (no fresh ones on hand). fleet_flash_custom.py
+     caught the fast window and **flashed V24** — a deliberate deviation
+     from the soak gate: at a ~daily hang cadence this unit is the best
+     watchdog validator, and the Liebherr (soak-gate spot check) was out
+     of radio range from room 225. Verified IBS-V24 by GATT and fw
+     24.0.0 on air; clean 60 s fast window → 10 s cadence transition.
+   - Post-hang voltage 2.65 V: 2.741 → 2.65 over ~20 h wedged ≈ 110
+     mV/day — the full-awake drain fingerprint holds exactly. Cells now
+     marginal (gauge 65%); swap soon, lithium if the pack sits inside
+     the freezer.
+   - V24 soak clock zero for this unit ≈ 2026-08-19T07:04:30Z (±30 s,
+     inferred from fast-window timing) — the CMD_ID_UTC_TIME
+     zero-reset check applies here too. Fleet is now 2× V24 (Liebherr,
+     R120-FR2), 10× V22, 3× V23.
+   - Offline-mute toggle for the unit switched back off 07:08Z after
+     both receivers showed it green — alarm coverage re-armed.
+   - Watchdog live test now armed on the fastest reproducer: if the
+     next R120-FR2 wedge self-clears in ≤64 s, V24 works in the field →
+     roll fleet-wide without waiting for spontaneous Liebherr hangs.
+
+   **2026-08-19 ~09:38Z: Liebherr soak spot check PASSED — fleet
+   roll-out gate is open.** GATT CMD_ID_UTC_TIME read 168,152 s
+   (46.71 h) vs 46.71 h elapsed since the 10:56Z soak zero; deficit
+   −8…−12 s, within the ±1 min zero-time uncertainty. Clock accuracy
+   ~1e-4 over the soak. IBS-V24 confirmed on the link; unit healthy on
+   air (fw 24.0.0, 3.119 V, fridge 5.7 °C). Connection required the
+   sudo raw-HCI helper (14 normal bleak attempts failed against the
+   10 s advertising interval — kernel 4 s create-conn limit; first
+   adopted link dropped before GATT settled, second attempt clean).
+   Semantics caveat (source-checked): restore_utc_time_sec() restores
+   the clock from AON SLEEP_R (checkpointed every ~10 s), and the
+   watchdog's AP_PCR SW_RESET likely leaves AON intact — so ONE quiet
+   watchdog reset (~10-70 s deficit) hides inside the zero-time
+   uncertainty; zeroing resets and repeated resets are excluded. The
+   measured near-zero deficit therefore means "no spurious-watchdog
+   defect", which is what the gate was for. Residual single-reset
+   ambiguity is covered by the R120-FR2 live test (~daily hang cadence
+   on V24: next wedge should surface as a ≤64 s blip). Remaining fleet
+   to upgrade: 10× V22 + 2× V23 (Thermo ES, Gram) after R120-FR2's
+   same-day recovery flash.
+
+   **2026-08-19 decision (owner): fleet HOLDS on V22/V23 — the open
+   gate stays deliberately unused.** Rationale: V24 is recovery, not a
+   fix — identical to V23 plus the watchdog, which costs no power in
+   normal operation (fed by adv completions; sleep periods ≤10 s never
+   approach the 64 s period), so there is no battery upside to justify
+   touching healthy units; and V23 carries a possible 2-3× drain
+   regression vs V22 (item 8, cell-history confounded, unresolved), so
+   upgrading the V22 majority means adopting that risk blind. The 12
+   never-hung units stay as-is; a unit that DOES hang gets recovered
+   onto V24 like R120-FR2 was (upgrade-on-recovery policy).
+   Follow-ups this decision creates:
+   (a) **Reboot-burst detection**: every V24 watchdog reset opens the
+   60 s fast-adv window (~1.5 s cadence) — a receiver-side flurry of
+   updates that can be logged as a "unit rebooted" event, giving hang
+   timestamps to ±64 s from the V24 pair (better than the ~15 min
+   resolution the unavailability rule gives V22/V23 sentinels) with no
+   outage. Build this before the next R120-FR2 wedge.
+   (b) **Drain experiment**: the V24 pair (Liebherr, R120-FR2) vs the
+   V22/V23 baseline in mV/day over the coming weeks — if item 8's
+   anomaly is episodic radio-silent wedges >64 s, V24 units should
+   drain measurably less. Confound note: R120-FR2 is on old ~2.65 V
+   cells (swap pending).
+   (c) Thermo ES (…17:9B:AF, 2.696 V / 69% on 2026-08-19) needs fresh
+   cells soon regardless — doing that swap on a V23 unit is also the
+   deconfounding cell-history measurement item 8 asks for.
 
 ## Historical Note
 
