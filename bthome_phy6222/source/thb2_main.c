@@ -27,6 +27,7 @@
 #include "gapbondmgr.h"
 #include "pwrmgr.h"
 #include "gpio.h"
+#include "watchdog.h"
 #include "thb2_main.h"
 #include "ll.h"
 #include "ll_hw_drv.h"
@@ -784,6 +785,12 @@ uint16_t BLEPeripheral_ProcessEvent( uint8_t task_id, uint16_t events )
 {
 	VOID task_id; // OSAL required parameter that isn't used in this function
 	if ( events & ADV_BROADCAST_EVT) {
+#if (DEVICE == DEVICE_IBSTH2P)
+		// V24 recovery watchdog: this event fires only when the radio
+		// actually completed an advertising event, so feeding here makes
+		// "advertising alive" the condition for staying up.
+		hal_watchdog_feed();
+#endif
 		adv_measure();
 		LOG("advN%u\n", adv_wrk.meas_count);
 		// return unprocessed events
