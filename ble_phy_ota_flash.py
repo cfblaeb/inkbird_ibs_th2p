@@ -120,7 +120,7 @@ async def flash(client, img):
         await client.write_gatt_char(OTA_CHAR, bytes([0x02, 0xFF]), response=False)
     except Exception:
         pass  # device drops the link on reset — expected
-    print(stamp(), "=== FLASH COMPLETE — device rebooting, boot updater installs V16 ===")
+    print(stamp(), "=== FLASH COMPLETE — device rebooting into the new image ===")
 
 
 async def get_connected(bus):

@@ -122,7 +122,7 @@
 // Single source of the IBSTH2P firmware version: NN yields the "IBS-VNN"
 // Software Revision string and the BTHome firmware version object
 // (advertised as NN.0.0, see adv_set_data() in bthome_beacon.c).
-#define IBS_FW_VERSION	23
+#define IBS_FW_VERSION	24
 #ifdef UCAP_PROBE
 // 'X' instead of 'V' marks a probe image in the revision characteristic.
 #define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'X', '0' + (IBS_FW_VERSION / 10), '0' + (IBS_FW_VERSION % 10), 0}

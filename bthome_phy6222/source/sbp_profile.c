@@ -21,6 +21,7 @@
 //#include "log.h"
 #include "thb2_peripheral.h"
 #include "thb2_main.h"
+#include "watchdog.h"
 #include "sbp_profile.h"
 #include "cmd_parser.h"
 #include "ble_ota.h"
@@ -359,6 +360,12 @@ static bStatus_t simpleProfile_ReadAttrCB( uint16_t connHandle, gattAttribute_t 
 		// Insufficient authorization
 		return ( ATT_ERR_INSUFFICIENT_AUTHOR );
 	}
+
+#if (DEVICE == DEVICE_IBSTH2P)
+	// V24 recovery watchdog: keep an active GATT client (e.g. an OTA
+	// transfer) alive even if advertising pauses during the connection.
+	hal_watchdog_feed();
+#endif
 
 	if ( pAttr->type.len == ATT_BT_UUID_SIZE )
 	{

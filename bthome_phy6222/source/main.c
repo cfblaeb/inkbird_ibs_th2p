@@ -587,6 +587,15 @@ int main(void) {
 
 #if CFG_SLEEP_MODE == PWR_MODE_SLEEP && DEVICE != DEVICE_IBSTH2P
 	watchdog_config(WDG_32S);
+#elif CFG_SLEEP_MODE == PWR_MODE_SLEEP && DEVICE == DEVICE_IBSTH2P
+	// V24: recovery watchdog for the field-observed full-awake hang
+	// (radio silent, chip wedged awake at ~mA; see project plan item 9).
+	// Fed from ADV_BROADCAST_EVT (real adv TX completions) and incoming
+	// GATT writes; re-armed+fed on every sleep-wake by wakeup_init1()'s
+	// __wdt_init(). A wedge stops all feeds -> hardware reset within 64 s.
+	// 64 s (not 32) gives margin over legitimate awake gaps (connection
+	// dwell with paused adv) at no cost to multi-day hang detection.
+	watchdog_config(WDG_64S);
 #endif
 
 //	spif_config(SYS_CLK_DLL_64M, 1, XFRD_FCMD_READ_DUAL, 0, 0);
