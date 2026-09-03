@@ -25,6 +25,7 @@ works well on stock — hard blocklist below).
 """
 import asyncio
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -44,7 +45,7 @@ PHY_SERVICE = "0000fcd2-0000-1000-8000-00805f9b34fb"
 SW_REV = "00002a28-0000-1000-8000-00805f9b34fb"
 
 DEFAULT_BUNDLE = Path(__file__).parent / "inkbird_fw" / \
-    "STAGE3_IBSTH2P_v23_stock_bundle_installer.hex16"
+    "STAGE3_IBSTH2P_v25_p10_stock_bundle_installer.hex16"
 
 ERR_NAMES = {  # pplusErrorName() in InkbirdOTA.html
     0x01: "verify error", 0x02: "unknown command", 0x03: "not in OTA mode",
@@ -276,7 +277,18 @@ async def main():
     await shb_upload(ota_addr, parts)
 
     addr, name, rev = await watch_new_custom(known)
-    ok = "V23" in rev
+    # Expected revision is read out of the bundle itself, not its filename:
+    # the staged image carries its own "IBS-Vnn"/"IBS-Pnn" string, so this also
+    # works for images whose revision letter does not match the file version
+    # (v25_p10 -> IBS-P25). Same idea as fleet_flash_custom.py, which greps the
+    # OTA binary.
+    revs = sorted(set(re.findall(rb"IBS-[VXP]\d\d",
+                                 b"".join(part.data for part in parts))))
+    expect = revs[0].decode() if len(revs) == 1 else None
+    if expect is None:
+        log(f"WARNING: could not read a unique revision from {bundle.name} "
+            f"(found {[r.decode() for r in revs]}); cannot verify the flash")
+    ok = expect is not None and expect in rev
     log(f"=== {'SUCCESS' if ok else 'CHECK NEEDED'}: {stock_addr} -> {addr} "
         f"({name}), revision {rev} ===")
     mapping = {"stock_addr": stock_addr, "new_addr": addr, "new_name": name,
