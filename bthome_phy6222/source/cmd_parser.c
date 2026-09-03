@@ -76,6 +76,9 @@ extern gapPeriConnectParams_t periConnParameters;
 #ifdef UCAP_SYNC
 #include "ucap_sync.h"
 #endif
+#ifdef UCAP_P10
+#include "ucap_p10.h"
+#endif
 
 #define FRAME_SIZE  UCAP_FRAME_SIZE
 
@@ -84,7 +87,7 @@ extern gapPeriConnectParams_t periConnParameters;
 static uint8_t rawcap_buf[RAWCAP_SIZE];
 static volatile uint8_t rawcap_pos = 0;
 
-#if defined(UCAP_PROBE) || defined(UCAP_SYNC)
+#if defined(UCAP_PROBE) || defined(UCAP_SYNC) || defined(UCAP_P10)
 // Raw RTC counter read (AP_AON->RTCCNT, 24-bit @32768 Hz, wraps every
 // 512 s — delta consumers handle wrap with 24-bit modular arithmetic).
 // Self-contained and ISR-safe; same double-read pattern as the reference
@@ -163,6 +166,211 @@ uart_capture_t ucap;
 
 static uart_Cfg_t ucap_uart_cfg;  // saved for re-init after sleep
 
+#ifdef UCAP_P10
+/*
+ * V25_P10 "P10 alone" scheduler glue. The state machine itself is
+ * ucap_p10.h (pure C, host-tested); this block owns the hardware:
+ * GPIO P10 edge IRQ, UART0 init/deinit, MOD_UART0/MOD_USR1 locks, OSAL
+ * timers and the OSAL events dispatched from thb2_main.c.
+ */
+static ucap_p10_t p10;                  /* scheduler state: task context only */
+volatile uint8_t p10_health;            /* task-context snapshot read by bthome_beacon.c */
+
+/* ISR/hook <-> task hand-off. Written in IRQ/wake context, read in task context. */
+static volatile struct {
+	uint32_t t0;            /* first-edge stamp of the current burst */
+	uint8_t  n;             /* edges in the burst, saturating; 0 = no burst pending */
+	uint8_t  src;           /* 0 = GPIO IRQ, 1 = wake stamp */
+	uint8_t  uart_on;       /* hal_uart_init succeeded and no deinit since */
+	uint8_t  repair_pending;/* a RECOVER is posted and not yet handled */
+	uint8_t  frame_ok;      /* UART ISR: CRC verdict of the frame stamped in frame_tick */
+	uint32_t frame_tick;    /* UART ISR: completion stamp (ucap_rtc) */
+	uint32_t irq_total;     /* raw negedge callbacks (telemetry) */
+	uint16_t wakes_io;      /* wakes classified as IO by the hook */
+	uint32_t wake_src_raw;  /* first non-zero AP_AON->GPIO_WAKEUP_SRC[0] seen (layout check) */
+	uint8_t  bad_sleep, bad_wake, uart_fail, gpio_fail;   /* saturating */
+} p10_hw;
+
+extern uint32_t g_wakeup_rtc_tick;      /* ll_sleep.c:44, set at patch.c:5734 before app_wakeup_process() */
+extern uint32_t g_counter_traking_avg;  /* ll_sleep.c:45, RC32K tracking (16 MHz cycles / 16 RC ticks) */
+
+static void p10_negedge_cb(gpio_pin_e pin, gpio_polarity_e type);
+static void p10_dispatch(p10_event_t type, uint32_t tick_override, uint32_t t0, uint8_t n, uint8_t ok, uint8_t src);
+static void p10_exec(const p10_out_t *o);
+static inline void p10_sat8v(volatile uint8_t *c) { if (*c < 255) (*c)++; }
+
+/* ---- ISR and hook side: stamp, count, post; nothing else ---- */
+
+/* GPIO negedge callback: real IRQ at IRQ_PRIO_APP, or synthesised by
+ * hal_gpio_wakeup_handler (gpio.c:603-606) before osal_start_system. */
+static void p10_negedge_cb(gpio_pin_e pin, gpio_polarity_e type)
+{
+	(void)pin; (void)type;
+	p10_hw.irq_total++;
+	if (p10_hw.n == 0) {
+		p10_hw.t0 = ucap_rtc(); p10_hw.src = 0;
+		osal_set_event(simpleBLEPeripheral_TaskID, SBP_P10_EDGE_EVT);
+	}
+	if (p10_hw.n < 255) p10_hw.n++;
+}
+
+/* MOD_USR1 wake hook. Runs inside hal_pwrmgr_wakeup_process (pwrmgr.c:319-328)
+ * after MOD_GPIO's handler (MOD_USR1 registers later), before osal_start_system. */
+static void p10_wake_hook(void)
+{
+	uint32_t src = AP_AON->GPIO_WAKEUP_SRC[0];
+	uint32_t rtc = ucap_rtc();
+	uint32_t to_alarm = (AP_AON->RTCCC0 - rtc) & 0xFFFFFF;
+	int io_wake = (to_alarm > 8u && to_alarm < 0x800000u);   /* alarm not reached -> not the RTC (A5) */
+	if (src && !p10_hw.wake_src_raw) p10_hw.wake_src_raw = src;
+	/* invariant: the chip never sleeps in these states / with UART on */
+	if (p10.st == P10_ST_VERIFY || p10.st == P10_ST_WINDOW || p10.st == P10_ST_SUSPENDED || p10_hw.uart_on) {
+		p10_sat8v(&p10_hw.bad_wake); p10_hw.repair_pending = 1;
+	}
+	if (p10_hw.repair_pending) osal_set_event(simpleBLEPeripheral_TaskID, SBP_P10_RECOVER_EVT);
+	if (!io_wake) return;
+	p10_hw.wakes_io++;
+	HAL_ENTER_CRITICAL_SECTION();                  /* the GPIO IRQ may already be live */
+	if (p10_hw.n == 0) {
+		p10_hw.t0 = g_wakeup_rtc_tick & 0xFFFFFF; p10_hw.src = 1; p10_hw.n = 1;
+		osal_set_event(simpleBLEPeripheral_TaskID, SBP_P10_EDGE_EVT);
+	}
+	HAL_EXIT_CRITICAL_SECTION();
+}
+
+/* MOD_USR1 sleep hook: assert only. Never call hal_uart_deinit here
+ * (hal_pwrmgr_unregister compacts mCtx while hal_pwrmgr_sleep_process iterates it). */
+static void p10_sleep_hook(void)
+{
+	if (p10.st == P10_ST_VERIFY || p10.st == P10_ST_WINDOW || p10.st == P10_ST_SUSPENDED
+	    || p10_hw.uart_on || hal_pwrmgr_is_lock(MOD_UART0) || hal_pwrmgr_is_lock(MOD_USR1)) {
+		p10_sat8v(&p10_hw.bad_sleep); p10_hw.repair_pending = 1;   /* the wake hook posts RECOVER */
+	}
+}
+
+/* ---- Pin/UART ownership: the only two functions that touch P10, UART0 and MOD_UART0 ---- */
+
+/* WAIT_OPEN/VERIFY -> WINDOW (lock=1) or any -> SUSPENDED (lock=0). Task context only. */
+static int p10_pin_to_uart(uint8_t lock)
+{
+	int ret;
+	if (p10_hw.uart_on) { p10_sat8v(&p10_hw.uart_fail); return -1; }   /* state machine violated */
+	hal_gpioin_disable(GPIO_P10);              /* explicit; hal_uart_init -> fmux_set does it too */
+	ucap.fr.in_frame = 0; ucap.fr.pos = 0;     /* the window starts on a clean framer (F1); no UART ISR can run here */
+	p10_hw.frame_ok = 0;
+	ret = hal_uart_init(ucap_uart_cfg, UART0);
+	if (ret != PPlus_SUCCESS) {                /* PPlus_ERR_BUSY: a deinit was skipped somewhere */
+		p10_sat8v(&p10_hw.uart_fail);
+		hal_uart_deinit(UART0);
+		ret = hal_uart_init(ucap_uart_cfg, UART0);
+		if (ret != PPlus_SUCCESS) return -1;   /* p10_exec posts RECOVER */
+	}
+	p10_hw.uart_on = 1;
+	if (lock) hal_pwrmgr_lock(MOD_UART0);      /* init BEFORE lock: lock on an unregistered module is a no-op */
+	return 0;
+}
+
+/* WINDOW/SUSPENDED/anything -> GPIO armed. Idempotent. Task context only. */
+static int p10_pin_to_gpio(void)
+{
+	hal_gpio_pull_set(GPIO_P10, GPIO_PULL_UP);                 /* weak; the main MCU drives the line */
+	if (hal_gpioin_enable(GPIO_P10) != PPlus_SUCCESS) {        /* handlers persist from ucap_init (G6) */
+		p10_sat8v(&p10_hw.gpio_fail);
+		if (hal_gpioin_register(GPIO_P10, NULL, p10_negedge_cb) != PPlus_SUCCESS) return -1;
+	}
+	return 0;
+}
+
+/* ---- Dispatcher and action executor ---- */
+
+static void p10_dispatch(p10_event_t type, uint32_t tick_override, uint32_t t0, uint8_t n, uint8_t ok, uint8_t src)
+{
+	p10_ev_t ev; p10_out_t o;
+	get_utc_time_sec();                                  /* A4: refresh clkt.utc_time_sec */
+	ev.type = type;
+	ev.tick = tick_override ? tick_override : ucap_rtc();
+	ev.sec  = clkt.utc_time_sec;
+	ev.t0 = t0; ev.n = n; ev.ok = ok; ev.src = src;
+	ev.ct = g_counter_traking_avg;                       /* G3; the header clamps to +-5 % */
+	p10_step(&p10, &ev, &o);
+	p10_exec(&o);
+	p10_health = p10.health;
+}
+
+/* Actions in bit order: stops -> unlocks -> UART off -> GPIO arm -> UART on
+ * -> locks -> timers -> ISR reset (see ucap_p10.h). */
+static void p10_exec(const p10_out_t *o)
+{
+	uint32_t a = o->acts; int fail = 0;
+	if (a & P10_ACT_STOP_VERIFY)   osal_stop_timerEx(simpleBLEPeripheral_TaskID, SBP_P10_VERIFY_EVT);
+	if (a & P10_ACT_STOP_OPEN)     osal_stop_timerEx(simpleBLEPeripheral_TaskID, SBP_UCAP_OPEN_EVT);
+	if (a & P10_ACT_STOP_CLOSE)    osal_stop_timerEx(simpleBLEPeripheral_TaskID, SBP_UCAP_CLOSE_EVT);
+	if (a & P10_ACT_UNLOCK_VERIFY) hal_pwrmgr_unlock(MOD_USR1);
+	if (a & P10_ACT_UART_OFF)      { hal_pwrmgr_unlock(MOD_UART0);              /* BEFORE deinit */
+	                                 if (p10_hw.uart_on) { hal_uart_deinit(UART0); p10_hw.uart_on = 0; } }
+	if (a & P10_ACT_GPIO_ARM)      fail |= p10_pin_to_gpio();
+	if (a & P10_ACT_UART_ON_FREE)  fail |= p10_pin_to_uart(0);
+	if (a & P10_ACT_UART_ON_LOCK)  fail |= p10_pin_to_uart(1);
+	if (a & P10_ACT_LOCK_VERIFY)   hal_pwrmgr_lock(MOD_USR1);
+	if (a & P10_ACT_START_VERIFY)  osal_start_timerEx(simpleBLEPeripheral_TaskID, SBP_P10_VERIFY_EVT, P10_VERIFY_MS);
+	if (a & P10_ACT_START_OPEN)    osal_start_timerEx(simpleBLEPeripheral_TaskID, SBP_UCAP_OPEN_EVT, o->open_ms);
+	if (a & P10_ACT_START_CLOSE)   osal_start_timerEx(simpleBLEPeripheral_TaskID, SBP_UCAP_CLOSE_EVT, o->close_ms);
+	if (a & P10_ACT_ISR_RESET)     { HAL_ENTER_CRITICAL_SECTION(); p10_hw.n = 0; HAL_EXIT_CRITICAL_SECTION(); }
+	if (fail && !p10_hw.repair_pending) {
+		p10_hw.repair_pending = 1;
+		osal_set_event(simpleBLEPeripheral_TaskID, SBP_P10_RECOVER_EVT);
+	}
+}
+
+/* ---- Task-context event handlers (public, called from thb2_main.c) ---- */
+
+void ucap_p10_edge_evt(void)
+{
+	uint32_t t0; uint8_t src;
+	HAL_ENTER_CRITICAL_SECTION(); t0 = p10_hw.t0; src = p10_hw.src; HAL_EXIT_CRITICAL_SECTION();
+	p10_dispatch(P10_EV_EDGE, 0, t0, 0, 0, src);
+}
+void ucap_p10_verify_evt(void)
+{
+	uint32_t t0; uint8_t n;
+	HAL_ENTER_CRITICAL_SECTION(); t0 = p10_hw.t0; n = p10_hw.n; HAL_EXIT_CRITICAL_SECTION();
+	p10_dispatch(P10_EV_VERIFY_TO, 0, t0, n, 0, 0);
+}
+void ucap_p10_open_evt(void)
+{
+	uint32_t t0; uint8_t n;                             /* needed if OPEN lands in VERIFY */
+	HAL_ENTER_CRITICAL_SECTION(); t0 = p10_hw.t0; n = p10_hw.n; HAL_EXIT_CRITICAL_SECTION();
+	p10_dispatch(P10_EV_OPEN, 0, t0, n, 0, 0);
+}
+void ucap_p10_close_evt(void)
+{
+	p10_dispatch(P10_EV_CLOSE, 0, 0, ucap.fr.in_frame ? 1 : 0, 0, 0);
+}
+void ucap_p10_frame_evt(void)
+{
+	uint32_t tick; uint8_t ok;
+	HAL_ENTER_CRITICAL_SECTION(); tick = p10_hw.frame_tick; ok = p10_hw.frame_ok; HAL_EXIT_CRITICAL_SECTION();
+	p10_dispatch(P10_EV_FRAME, tick ? tick : 1u, 0, 0, ok, 0);
+}
+void ucap_p10_recover_evt(void)
+{
+	p10_hw.repair_pending = 0;
+	p10_dispatch(P10_EV_RECOVER, 0, 0, 0, 0, 0);
+}
+void ucap_p10_connect(void)    { p10_dispatch(P10_EV_CONNECT, 0, 0, 0, 0, 0); }     /* GAPROLE_CONNECTED */
+void ucap_p10_disconnect(void) { p10_dispatch(P10_EV_DISCONNECT, 0, 0, 0, 0, 0); }  /* GAPROLE_WAITING */
+uint8_t ucap_p10_connected(void) { return p10_connected(&p10); }
+/* G1: from adv_measure() on every advertising event (task context). */
+void ucap_p10_sanity(void)
+{
+	if (p10_sanity_due(&p10, ucap_rtc())) p10_dispatch(P10_EV_RECOVER, 0, 0, 0, 0, 0);
+}
+
+/* Little-endian field writers for the GATT debug ops 5-8. */
+static void p10_put16(uint8_t *d, uint16_t v) { d[0] = v & 0xFF; d[1] = (v >> 8) & 0xFF; }
+static void p10_put32(uint8_t *d, uint32_t v) { p10_put16(d, (uint16_t)v); p10_put16(d + 2, (uint16_t)(v >> 16)); }
+#endif /* UCAP_P10 */
+
 // Consume a frame already validated (marker + CRC) by ucap_frame_feed().
 static void ucap_process_frame(void) {
 	uint8_t *f = ucap.fr.buf;
@@ -228,6 +436,12 @@ static void ucap_process_frame(void) {
 		ucap.last_tik = t;
 		osal_set_event(simpleBLEPeripheral_TaskID, SBP_UCAP_FRAME_EVT);
 	}
+#elif defined(UCAP_P10)
+	// Stamp the completed CRC-good frame and hand it to the P10 scheduler
+	// (task context). No lock release here (G5): the FRAME handler tears
+	// the window down within <1 ms.
+	p10_hw.frame_tick = ucap_rtc(); p10_hw.frame_ok = 1;
+	osal_set_event(simpleBLEPeripheral_TaskID, SBP_UCAP_FRAME_EVT);
 #endif
 #endif
 }
@@ -245,8 +459,20 @@ static void ucap_callback(uart_Evt_t *pev) {
 			rawcap_buf[rawcap_pos++] = b;
 		}
 
+#ifdef UCAP_P10
+		{
+			uint16_t cb = ucap.fr.crc_bad;
+			if (ucap_frame_feed(&ucap.fr, b))
+				ucap_process_frame();
+			else if (ucap.fr.crc_bad != cb) {      /* a full 13-byte buffer failed marker/CRC: timing anchor, no data */
+				p10_hw.frame_tick = ucap_rtc(); p10_hw.frame_ok = 0;
+				osal_set_event(simpleBLEPeripheral_TaskID, SBP_UCAP_FRAME_EVT);
+			}
+		}
+#else
 		if (ucap_frame_feed(&ucap.fr, b))
 			ucap_process_frame();
+#endif
 	}
 }
 
@@ -271,6 +497,24 @@ int ucap_init(void) {
 
 	memcpy(&ucap_uart_cfg, &cfg, sizeof(cfg));  // save for re-init
 
+#ifdef UCAP_P10
+	// V25_P10: no UART init, no lock, no boot window. P10 is a GPIO input
+	// with a falling-edge IRQ; the first main-MCU frame start bit wakes the
+	// chip and the scheduler opens one listen window for the next frame.
+	memset((void *)&p10_hw, 0, sizeof(p10_hw));
+	p10_init(&p10);
+	p10_health = 0;
+	ucap.uart_inited = 1;                                   /* op-0 semantics: "UART path configured" (ucap_stats.py) */
+	if (hal_pwrmgr_register(MOD_USR1, p10_sleep_hook, p10_wake_hook) != PPlus_SUCCESS)
+		p10_sat8v(&p10_hw.bad_sleep);                       /* 6 of 10 slots used; hooks are diagnostics + wake stamp only */
+	hal_gpio_pull_set(GPIO_P10, GPIO_PULL_UP);
+	if (hal_gpioin_register(GPIO_P10, NULL, p10_negedge_cb) != PPlus_SUCCESS) {   /* once: handlers + jump slot 240 */
+		p10_sat8v(&p10_hw.gpio_fail);
+		p10_hw.repair_pending = 1;
+		osal_set_event(simpleBLEPeripheral_TaskID, SBP_P10_RECOVER_EVT);
+	}
+	return 0;                                               /* no UART init, no lock, no boot window */
+#else
 	int ret = hal_uart_init(cfg, UART0);
 	ucap.uart_inited = (ret == 0) ? 1 : 0;
 
@@ -283,6 +527,7 @@ int ucap_init(void) {
 	}
 
 	return ret;
+#endif
 }
 
 // Monotonic count of detected device-button changes. The advertising loop
@@ -298,6 +543,12 @@ void ucap_start_grab(void) {
 #ifdef UCAP_PROBE
 	// Probe build: UART is permanently powered and locked since ucap_init;
 	// a deinit/init here would only risk corrupting an in-flight frame.
+	return;
+#endif
+#ifdef UCAP_P10
+	/* V25_P10: listen windows are opened only by the P10 scheduler (ucap_p10_open_evt).
+	 * Legacy callers (start_measure from adv_measure/TIMER_BATT_EVT) must not open
+	 * unmanaged windows (audit #11/#13/#24/#25/#32/#34/#38/#44). */
 	return;
 #endif
 	if (ucap.uart_inited) {
@@ -327,7 +578,7 @@ void ucap_update_measured_data(void) {
 		measured_data.temp = -(int16_t)(ucap.good_frames ? ucap.good_frames : 1);
 		measured_data.humi = -(int16_t)(ucap.fr.crc_bad ? ucap.fr.crc_bad : 1);
 	}
-#if !defined(UCAP_PROBE) && !defined(UCAP_SYNC)
+#if !defined(UCAP_PROBE) && !defined(UCAP_SYNC) && !defined(UCAP_P10)
 	// Close the grab window. Normally the first good frame already
 	// released the UART lock; this is the fallback for a window with no
 	// frames (unlock of an already-unlocked module is a harmless no-op).
@@ -1375,6 +1626,74 @@ int cmd_parser(uint8_t * obuf, uint8_t * ibuf, uint32_t len) {
 					memcpy(&obuf[olen], &probe_log[idx % PROBE_LOG_SIZE], sizeof(probe_rec_t));
 					olen += sizeof(probe_rec_t);
 				}
+#endif
+#ifdef UCAP_P10
+			// V25_P10 scheduler telemetry (section 8.2 of the V25_P10 spec).
+			// All 20 bytes so they fit the default MTU (23). Little-endian.
+			} else if (op == 5) {
+				// "P10 core"
+				obuf[1] = 0x5A;
+				obuf[2] = p10.st;
+				obuf[3] = p10.t_src;
+				p10_put16(&obuf[4], p10.t_est_ms);
+				p10_put16(&obuf[6], p10.edges);
+				p10_put16(&obuf[8], p10.glitches);
+				p10_put16(&obuf[10], p10.windows);
+				p10_put16(&obuf[12], p10.hits);
+				p10_put16(&obuf[14], p10.misses);
+				p10_put16(&obuf[16], p10.strays);
+				obuf[18] = p10.health;
+				obuf[19] = p10.miss_streak;
+				olen = 20;
+			} else if (op == 6) {
+				// "P10 diag"
+				uint8_t bad_sleep, bad_wake, uart_fail, gpio_fail; uint16_t wakes_io;
+				HAL_ENTER_CRITICAL_SECTION();
+				bad_sleep = p10_hw.bad_sleep; bad_wake = p10_hw.bad_wake;
+				uart_fail = p10_hw.uart_fail; gpio_fail = p10_hw.gpio_fail;
+				wakes_io = p10_hw.wakes_io;
+				HAL_EXIT_CRITICAL_SECTION();
+				obuf[1] = 0x5B;
+				p10_put16(&obuf[2], p10.hits_bad);
+				p10_put16(&obuf[4], p10.stale_evt);
+				p10_put16(&obuf[6], p10.win_aborted);
+				obuf[8] = p10.connects;
+				obuf[9] = p10.resumes;
+				obuf[10] = p10.recovers;
+				obuf[11] = bad_sleep;
+				obuf[12] = bad_wake;
+				obuf[13] = uart_fail;
+				obuf[14] = gpio_fail;
+				p10_put16(&obuf[15], wakes_io);
+				p10_put16(&obuf[17], p10.last_hit_pos_ms);
+				obuf[19] = (uint8_t)(p10.guard_ms / 10);
+				olen = 20;
+			} else if (op == 7) {
+				// "P10 raw"
+				uint32_t irq_total, wake_src_raw;
+				HAL_ENTER_CRITICAL_SECTION();
+				irq_total = p10_hw.irq_total; wake_src_raw = p10_hw.wake_src_raw;
+				HAL_EXIT_CRITICAL_SECTION();
+				obuf[1] = 0x5C;
+				p10_put32(&obuf[2], irq_total);
+				p10_put32(&obuf[6], wake_src_raw);
+				p10_put32(&obuf[10], p10.hist);
+				obuf[14] = p10.hist_n;
+				p10_put16(&obuf[15], p10.last_dt_ms);
+				p10_put16(&obuf[17], p10.rc_ct);
+				obuf[19] = p10.sanity_recovers;
+				olen = 20;
+			} else if (op == 8) {
+				// "P10 misc"
+				obuf[1] = 0x5D;
+				p10_put16(&obuf[2], p10.frame_oos);
+				p10_put16(&obuf[4], p10.partial_at_close);
+				p10_put32(&obuf[6], p10.t_e);
+				p10_put32(&obuf[10], p10.anchor_tick);
+				obuf[14] = p10.anchor_valid;
+				p10_put32(&obuf[15], p10.win_open_tick);
+				obuf[19] = 0;
+				olen = 20;
 #endif
 			} else {
 				obuf[1] = 0xFF;

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """pvvx-path fleet flasher: upgrade a custom-firmware IBSTH2P to the
-pinned OTA image (OTA_BIN below, currently V24).
+pinned OTA image (IMAGES below; default v24 = fleet release, or
+IBS_OTA_IMAGE=p10 for the V25 "P10 alone" experiment image, IBS-P25).
 
 For devices already on custom firmware (38:1F:8D:* BTHome). Their address
 does NOT change across the flash, so HA identity is untouched.
@@ -10,6 +11,7 @@ V15-V17 firmware (no fast window): run the sudo raw-HCI helper in another
 terminal instead; this script's retry loop will attach to that link.
 
 Usage: python3 fleet_flash_custom.py 38:1F:8D:XX:XX:XX
+       IBS_OTA_IMAGE=p10 python3 fleet_flash_custom.py 38:1F:8D:XX:XX:XX
 """
 import asyncio
 import sys
@@ -19,7 +21,15 @@ from pathlib import Path
 from bleak import BleakClient
 
 REPO = Path(__file__).parent
-OTA_BIN = REPO / "inkbird_fw" / "BOOT_IBSTH2P_v24_ota.bin"
+import os, re
+IMAGES = {
+    "v24": "BOOT_IBSTH2P_v24_ota.bin",        # default, fleet release
+    "p10": "BOOT_IBSTH2P_v25_p10_ota.bin",    # V25 "P10 alone" experiment (IBS-P25)
+}
+IMAGE = os.environ.get("IBS_OTA_IMAGE", "v24")
+if IMAGE not in IMAGES:
+    sys.exit(f"IBS_OTA_IMAGE must be one of {sorted(IMAGES)}")
+OTA_BIN = REPO / "inkbird_fw" / IMAGES[IMAGE]
 SW_REV_CHAR = "00002a28-0000-1000-8000-00805f9b34fb"
 
 ADDR = sys.argv[1].upper() if len(sys.argv) > 1 else ""
@@ -77,7 +87,8 @@ async def main():
         return 0
     try:
         rev = (await client.read_gatt_char(SW_REV_CHAR)).decode()
-        expect = "V" + "".join(c for c in OTA_BIN.stem.split("_")[-2].lstrip("v") if c.isdigit())
+        m = re.search(rb"IBS-[VXP]\d\d", open(OTA_BIN, "rb").read())
+        expect = m.group().decode() if m else OTA_BIN.stem
         print(f"post-flash Software Revision: {rev} "
               f"{f'— {expect} CONFIRMED' if expect in rev else '— UNEXPECTED!'}",
               flush=True)

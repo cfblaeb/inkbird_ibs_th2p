@@ -118,6 +118,20 @@ void ucap_sync_close_evt(void);
 #ifdef UCAP_PROBE
 uint8_t probe_make_msg(uint8_t *pbuf); // frame-period probe live message
 #endif
+#ifdef UCAP_P10
+// V25_P10 "P10 alone" scheduler (task context; see cmd_parser.c / ucap_p10.h)
+void ucap_p10_edge_evt(void);
+void ucap_p10_verify_evt(void);
+void ucap_p10_open_evt(void);
+void ucap_p10_close_evt(void);
+void ucap_p10_frame_evt(void);
+void ucap_p10_recover_evt(void);
+void ucap_p10_connect(void);        // GAPROLE_CONNECTED
+void ucap_p10_disconnect(void);     // GAPROLE_WAITING[_AFTER_TIMEOUT]; no-op unless suspended
+uint8_t ucap_p10_connected(void);   // 1 while SUSPENDED (connection up)
+void ucap_p10_sanity(void);         // lost-timer / leaked-lock sweep, from adv_measure()
+extern volatile uint8_t p10_health; // BTHome 0x09 value, task-context snapshot
+#endif
 #endif
 
 #ifdef __cplusplus

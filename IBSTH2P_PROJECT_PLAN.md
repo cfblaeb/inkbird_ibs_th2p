@@ -825,6 +825,190 @@ every 10 s (`GAPROLE_CONNECTED` path, `thb2_main.c:1106-1108`) — connecting
 with e.g. nRF Connect is an ad-hoc "live button mode", though presses during
 the connection collapse into a single press event fired after disconnect.
 
+## V25_P10: "P10 alone" edge-wake UART scheduler (experiment build, pending hardware validation)
+
+Written 2026-09-03 by the implementation agent (draft; owner wording pending).
+Branch `v25-p10` off `ad4c510` (V24). Implementation spec: SPEC_V25_P10.md
+(2026-09-02, session scratchpad, not in the repo). Not flashed to any unit yet.
+
+What it does: UART0 stays deinitialised and the chip sleeps at the floor; every
+~10.4 s main-MCU frame's start bit wakes the PHY6222 through GPIO P10 (falling
+edge, AON wake). The frame that wakes us is lost; its stamp opens ONE short UART
+listen window (230 ms at guard 100) for the NEXT frame at `t_e + T_est - guard`,
+then the flow returns to waiting for an edge. A miss never opens another window.
+Data therefore arrives every ~21 s (every second frame) while `read_sensors()`
+and the packet id keep the 10 s advertising cadence (half the packets repeat
+values by design; `bthome_catch_log.py`'s changed-values fraction halves).
+Connections suspend the flow (UART on, unlocked, for the whole connection).
+
+Files: `source/ucap_p10.h` (new, the whole state machine, pure C, host-tested by
+`tests/test_ucap_p10.c`, 115 checks), glue in `cmd_parser.c` (`#ifdef UCAP_P10`),
+event dispatch/hooks in `thb2_main.c/.h` (reuses the compiled-out
+`PIN_INPUT_EVT`/`KEY_CHANGE_EVT`/`SBP_PROBE_EVT` bits, guarded by `#error`),
+`config.h/.c` (`IBS_FW_VERSION 25`, `IBS-P25` revision under `UCAP_P10`,
+`IBS-V25` otherwise), `bthome_beacon.h/.c` (BTHome 0x09 count object = listen
+health %, ascending object order 0x01 0x02 0x03 0x09 0x0C 0xF2, 27-byte payload),
+`SDK/components/driver/uart/uart.c` (see confound 1), `fleet_flash_custom.py`
+(`IBS_OTA_IMAGE=p10` selector, default stays `v24`; revision sniffed from the
+image). GATT debug ops `0x03` op 5-8 expose the scheduler counters (20-byte
+replies, default MTU); `ucap_stats.py` still needs a `--p10` reader.
+
+Build define: `PROJECT_DEF="-DDEVICE=DEVICE_IBSTH2P -DUCAP_P10=1"`. Both V25
+lines compile (plain V25 = `IBS-V25`, only built as a control, not shipped).
+XIP use of the P10 image: 0x9d1c of 0xF000 (V24: 0x933c; +2528 bytes).
+
+Artifacts (2026-09-03, after the review fixes below):
+- `inkbird_fw/BOOT_IBSTH2P_v25_p10.hex`
+  sha256 `7ccfcd09390b1bbe6fea66179075fc4fdb72cd997434fc6ff0435512514b664c`
+- `inkbird_fw/BOOT_IBSTH2P_v25_p10_ota.bin` (pvvx OTA image)
+  sha256 `573c08041d6bb79edd792c7c9d0beedfb1e30671a1aba7d48eaf654f25e1279d`
+  (`IBS-P25` x1, `IBS-V` x0, no `ucap_sync` symbol in the map, `b[3] = 25`.)
+
+Toolchain provenance (`/home/laeb/toolchains/debtc`, dpkg -x, no root):
+`gcc-arm-none-eabi_14.2.rel1-1_amd64.deb`
+(99252fdda02ad134e8c3c344d3c843f7aa5c0d006e92a5b3d53daf4bd935b5d3),
+`libnewlib-arm-none-eabi_4.5.0.20241231-1_all.deb`
+(b444760d62896f03db89d6db94936929f300b72445763557fa94da32b7732f51),
+`libnewlib-dev_4.5.0.20241231-1_all.deb`
+(feb2ed49a464b0346e42c3506088a41025273bff5f8e6bc5777afeac3704b3c1),
+`binutils-arm-none-eabi_2.42-1ubuntu1+23_amd64.deb` (Launchpad; as/ld via `-B`)
+(2aab2d6a7e4c21ce33462f8b52b972e2a8e4597e79b5add5502e2d1f3e543472).
+V24 reproduction on clean HEAD: OTA `.bin` byte-identical to
+`inkbird_fw/BOOT_IBSTH2P_v24_ota.bin`; `.hex` identical modulo line endings
+(the shipped v24 hex has CRLF, the rebuild LF).
+
+Confounds and facts to keep in mind when evaluating a P10 unit:
+1. `uart.c` fix (unconditional, both V25 lines): `uart_hw_init/deinit` no longer
+   call `hal_gpio_pull_set(GPIO_DUMMY)` / `hal_gpio_fmux(GPIO_DUMMY)` for the
+   unused TX pin (`c_gpio_pull[255]` was an out-of-bounds write landing in
+   `AP_AON->PMCTL0`, i.e. P31-P34 pull/wake-polarity bits, at boot and at every
+   `hal_uart_init`). Sleep-current comparisons V24 vs V25_P10 are confounded by
+   this as well as by the scheduler; compare against the plain V25 build, or
+   apply the same guard to the baseline.
+2. The V24 watchdog is fed on GATT *writes* (sbp_profile.c), not reads; reading
+   ops 5-8 does not feed it.
+3. `bthome_catch_log.py` / `bthome_monitor.py` do not decode BTHome 0x09 yet
+   (2-byte object between 0x03 and 0x0C); extend them before using them on a P10
+   unit or they mis-parse the tail. HA (bthome-ble 3.23.4) shows 0x09 as a
+   unit-less "Count" sensor: 100 = every window caught a CRC-good frame.
+4. RC32K correction (G3) uses the SDK's `g_counter_traking_avg` (ll_sleep.c:45,
+   initial 3906, 7/8 IIR per sleep entry at ll_sleep.c:183). The header treats
+   ct < 7421 as unconverged and falls back to nominal, so the first ~1 min after
+   boot is uncorrected: on a unit whose RC32K sits >= ~1 % off, the first
+   windows miss and the host-test expectation "first data at ~23 s" will not
+   hold; expect data within a few minutes instead. `rc_ct` (op 7) shows the
+   value in use.
+
+Review fixes applied 2026-09-03 (deviations from SPEC_V25_P10 section 4/10):
+- Period band `P10_T_MIN_MS/P10_T_MAX_MS` = 7000..13999 ms (spec: 6000..16000).
+  The spec's invariant "T_MAX < 2*T_MIN, a double period can never train" was
+  false for 6000..16000: for a main MCU with T in [6, 8) s one chopped frame at
+  window open let the edge learner accept 2T and the hit path then confirmed it
+  forever (data every 3T, health 100). 7000..13999 restores the invariant
+  (enforced by `#error`), still -33 %/+35 % around the measured 10.39 s. Host
+  tests T12 (band points) and T29 (the 2T trace) cover it.
+- Guard ladder 100 -> 200 -> 400 ms (spec: one doubling to 200). With the
+  guard capped at 200 an uncorrected prediction bias > 200 ms (RC32K > 1.9 % off
+  with G3 unavailable) was a permanent all-miss state with no escalation. Guard
+  400 (830 ms window) engages after 4 consecutive misses and covers |bias| <
+  400 ms (RC error < 3.8 %); beyond that the unit stays all-miss but visible
+  (op 5: `miss_streak` climbing, health 0, `guard_ms` 40 in op 6). Host tests
+  T7, T26, T30.
+
+First-hour acceptance read (ops 5-8, spec 13.15): `edges ~ windows ~ hits`,
+`misses <= 3`, `glitches` small, `strays == button presses`, `health >= 95`,
+diag counters (`bad_sleep/bad_wake/uart_fail/gpio_fail/recovers`) all 0,
+`rc_ct` in 7421..8203, note `wake_src_raw`. Anything else: read `st`,
+`t_est_ms`, `guard_ms`, `last_hit_pos_ms` (ideal ~118) before changing constants.
+Flash: `IBS_OTA_IMAGE=p10 python3 fleet_flash_custom.py 38:1F:8D:XX:XX:XX`.
+
+State machine (`ucap_p10.h`, task context only; glue executes an action mask
+in fixed bit order: stops -> unlocks -> UART off -> GPIO arm -> UART on ->
+locks -> timers -> ISR reset):
+1. WAIT_EDGE: UART off, P10 input + pull-up, falling-edge IRQ armed as AON
+   wake source; chip sleeps at the floor.
+2. Edge (GPIO callback or MOD_USR1 wake hook) -> VERIFY: lock MOD_USR1,
+   20 ms timer, ISR counts falling edges since `t0`.
+3. VERIFY_TO: >= 4 edges = real frame (`edges++`, learn T from the previous
+   anchor if usable), arm OPEN at `t0 + T_est - guard` (RC32K-corrected),
+   -> WAIT_OPEN (sleeps). < 4 edges = `glitches++`, back to the previous state.
+4. WAIT_OPEN edge (button frame) -> VERIFY(from WAIT_OPEN): counted as
+   `strays`, re-anchors, OPEN stays armed.
+5. OPEN -> WINDOW: `hal_uart_init` + lock MOD_UART0 (GPIO IRQ masked by the
+   fmux), CLOSE timer `2*guard + 18 + 12` ms (230 at guard 100).
+6. FRAME in WINDOW = hit (`hits++`, `hits_bad++` if CRC-bad, hist<<ok,
+   T_est re-learnt from `tick - 18 ms` vs the anchor, guard -> 100), -> WAIT_EDGE.
+7. CLOSE in WINDOW = miss (`misses++`, hist<<0, `miss_streak++`; guard
+   100 -> 200 at 2 misses -> 400 at 4), -> WAIT_EDGE. Never a second window.
+8. CONNECT from any state -> SUSPENDED: stop timers, UART on unlocked for
+   the whole connection (MOD_USR0 keeps the chip awake); DISCONNECT ->
+   WAIT_EDGE, anchor invalidated.
+9. RECOVER (wake-hook invariant failure, failed SDK call, or the
+   `ucap_p10_sanity()` sweep from `adv_measure`: VERIFY > 1 s, WINDOW > 2 s,
+   WAIT_OPEN > 20 s) -> WAIT_EDGE (or stays SUSPENDED) with everything torn
+   down and rebuilt; `recovers`/`sanity_recovers` count it.
+10. Anything not in the table: ignored, `stale_evt++` (covers OSAL events
+    posted before their timer was stopped). T band 7000..13999 ms, seed
+    10390; anchor ages out after 200 s.
+
+Telemetry (GATT `CMD_ID_I2C_SCAN` 0x03, sub-op in byte 1; 20-byte little-endian
+replies, work at the default MTU 23; op 0 unchanged for `ucap_stats.py`):
+- op 5 "core" `03 5A`: [2] st [3] t_src [4..5] t_est_ms [6..7] edges
+  [8..9] glitches [10..11] windows [12..13] hits [14..15] misses
+  [16..17] strays [18] health [19] miss_streak.
+- op 6 "diag" `03 5B`: [2..3] hits_bad [4..5] stale_evt [6..7] win_aborted
+  [8] connects [9] resumes [10] recovers [11] bad_sleep [12] bad_wake
+  [13] uart_fail [14] gpio_fail [15..16] wakes_io [17..18] last_hit_pos_ms
+  [19] guard_ms/10.
+- op 7 "raw" `03 5C`: [2..5] irq_total u32 [6..9] wake_src_raw u32
+  [10..13] hist u32 (bit i = window now-i, 1 = CRC-good) [14] hist_n
+  [15..16] last_dt_ms [17..18] rc_ct [19] sanity_recovers.
+- op 8 "misc" `03 5D`: [2..3] frame_oos [4..5] partial_at_close [6..9] t_e
+  (24-bit RTC) [10..13] anchor_tick [14] anchor_valid [15..18] win_open_tick
+  [19] 0.
+Invariants: `windows == hits + misses (+1 if st == WINDOW)`;
+`edges - strays >= windows`; `bad_sleep == bad_wake == uart_fail == gpio_fail
+== recovers == 0` on a healthy unit.
+
+BTHome 0x09 (count, uint8, no unit) = `health`: CRC-good yield in % over the
+last <= 32 windows, 0 until the first window closes; copied in `adv_set_data`
+(task context, self-consistent snapshot). Read: 100 healthy; ~50 every other
+window misses (timing); 0 with `edges` climbing = timing broken; 0 with
+`hits_bad` climbing = CRC-bad stream from the main MCU; frozen with `edges`
+flat = silent main MCU. Object order 0x01 0x02 0x03 0x09 0x0C 0xF2, payload
+27 bytes (25 during the 0x3A button burst).
+
+Host tests: `tests/test_ucap_p10.c` 115 checks (T1-T30) pass under
+`-fsanitize=address,undefined`; `test_ucap_sync` and `test_ucap_frame`
+unchanged and passing. Binary name is gitignored.
+
+Residual risks, only resolvable on hardware (spec section 13):
+- `AP_AON->GPIO_WAKEUP_SRC[0]` bit layout unknown; `wake_src_raw` (op 7)
+  answers it. If it stays 0 the RTC-comparator heuristic carried the wake.
+- `g_wakeup_rtc_tick` stamp offset (assumed ~0.6 ms after the edge);
+  `last_hit_pos_ms` (ideal ~118) shows any constant error.
+- ROM wake latency vs the ">= 4 edges in 20 ms" rule: `glitches` climbing
+  while `edges` stays 0 -> lower `P10_VERIFY_MIN_EDGES` or lengthen
+  `P10_VERIFY_MS`.
+- Whether the MOD_USR1 lock really blocks sleep across the 20 ms VERIFY
+  timer; failure shows as `bad_wake` + RECOVER, not silently.
+- RC32K correction sign/magnitude: `rc_ct` should sit near 7812; misses
+  with steady `edges` and `rc_ct` < 7421 = unconverged tracking.
+- `P10_FRAME_RX_MS = 18` is computed, not measured (constant error cancels;
+  variable error widens the hit-position spread).
+- Awake current in VERIFY/WINDOW (1.5-3 mA assumed, unmeasured); field proxy
+  is battery-voltage slope vs a plain-V25 unit over weeks.
+- `uart.c` PMCTL0 fix changes P31-P34 sleep behaviour in an unknown direction
+  on both V25 lines (confound 1 above).
+- UART-on-during-connection relies on MOD_USR0 never being released while
+  connected (V23 bounce fixes); a wake mid-connection flags `bad_sleep`.
+- First GPIO-IRQ use on this device (jump slot 240 unused before V25);
+  `irq_total` vs `edges*~12` is the sanity ratio.
+- HA/tooling: bthome-ble 3.23.4 creates a new "Count" entity; local scripts
+  need 0x09 first (confound 3); `ucap_stats.py --p10` not implemented.
+- `uart_hw_deinit` disassembly (gcc 14.2) checked: `hal_gpio_fmux` call is
+  guarded by `cmp r0, #255`; no unconditional GPIO_DUMMY path remains.
+
 ## Next Work
 
 1. Measure battery behavior of V16+ (early UART sleep-release) against the

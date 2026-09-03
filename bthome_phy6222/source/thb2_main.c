@@ -266,6 +266,9 @@ static void adv_measure(void) {
 
 	if(gapRole_AdvEnabled) {
 		get_utc_time_sec(); // счет UTC timestamp
+#ifdef UCAP_P10
+		ucap_p10_sanity();     // lost-timer / leaked-lock sweep, every advertising event
+#endif
 #if DEVICE == DEVICE_IBSTH2P
 		{
 			extern uint32_t ucap_get_clicks(void);
@@ -853,7 +856,26 @@ uint16_t BLEPeripheral_ProcessEvent( uint8_t task_id, uint16_t events )
 		return ( events ^ SBP_UCAP_CLOSE_EVT);
 	}
 #endif
+#ifdef UCAP_P10
+	// V25_P10 P10 scheduler. Order = priority when several bits are pending
+	// (OSAL re-enters with the remaining bits): RECOVER first; FRAME before
+	// CLOSE so a frame that completed as the close timer expired is a hit;
+	// VERIFY before OPEN so a due verdict is settled before the window opens;
+	// OPEN before EDGE so an edge in the same tick as the open is stale.
+	if( events & SBP_P10_RECOVER_EVT) { ucap_p10_recover_evt(); return ( events ^ SBP_P10_RECOVER_EVT); }
+	if( events & SBP_UCAP_FRAME_EVT)  { ucap_p10_frame_evt();   return ( events ^ SBP_UCAP_FRAME_EVT); }
+	if( events & SBP_UCAP_CLOSE_EVT)  { ucap_p10_close_evt();   return ( events ^ SBP_UCAP_CLOSE_EVT); }
+	if( events & SBP_P10_VERIFY_EVT)  { ucap_p10_verify_evt();  return ( events ^ SBP_P10_VERIFY_EVT); }
+	if( events & SBP_UCAP_OPEN_EVT)   { ucap_p10_open_evt();    return ( events ^ SBP_UCAP_OPEN_EVT); }
+	if( events & SBP_P10_EDGE_EVT)    { ucap_p10_edge_evt();    return ( events ^ SBP_P10_EDGE_EVT); }
+#endif
 	if( events & TIMER_BATT_EVT) {
+#ifdef UCAP_P10
+		// Audit #13: a timer expiry already posted survives osal_stop_timerEx at
+		// disconnect. Only the connected loop may re-arm this timer.
+		if (!ucap_p10_connected())
+			return ( events ^ TIMER_BATT_EVT);
+#endif
 		LOG("TIMER_EVT\n");
 		get_utc_time_sec(); // счет UTC timestamp
 #if (DEV_SERVICES & SERVICE_THS)
@@ -1154,7 +1176,11 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 			adv_button_press = 0;
 			adv_button_hold = 0;
 			// Trigger first measurement quickly (10 sec), then every 5 min
+#ifdef UCAP_P10
+			ucap_p10_connect();     // suspend the P10 flow; UART on unlocked for the connection
+#else
 			ucap_start_grab();
+#endif
 			osal_start_timerEx(simpleBLEPeripheral_TaskID, TIMER_BATT_EVT, 10000);
 #elif (DEV_SERVICES & SERVICE_THS)
 			osal_start_reload_timer(simpleBLEPeripheral_TaskID, TIMER_BATT_EVT, adv_wrk.measure_interval_ms); // 10000 ms
@@ -1189,6 +1215,13 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 			LOG("Gaprole_Disconnection\n");
 			osal_stop_timerEx(simpleBLEPeripheral_TaskID, TIMER_BATT_EVT);
 #if DEVICE == DEVICE_IBSTH2P
+#ifdef UCAP_P10
+			// Brief item 6 / audit #38 #44: UART off, MOD_UART0/MOD_USR1 released,
+			// P10 re-armed — while the chip is still held awake by MOD_USR0.
+			// No-op unless the machine is SUSPENDED (a WAITING without a
+			// preceding CONNECTED must not disturb a live P10 cycle).
+			ucap_p10_disconnect();
+#endif
 			// Allow sleep again after disconnect
 			hal_pwrmgr_unlock(MOD_USR0);
 #endif

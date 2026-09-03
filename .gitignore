@@ -12,3 +12,4 @@ inkbird_fw/build/stock_bundle_installer/*.map
 inkbird_fw/build/stock_bundle_installer/*.asm
 inkbird_fw/build/stock_bundle_installer/*.bin
 /private/
+bthome_phy6222/tests/test_ucap_p10

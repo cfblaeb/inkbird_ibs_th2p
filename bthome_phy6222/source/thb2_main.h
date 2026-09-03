@@ -73,6 +73,18 @@ extern "C"
 #define SBP_UCAP_FRAME_EVT    0x1000  // UCAP_SYNC: good frame received, schedule next window
 #define SBP_UCAP_OPEN_EVT     0x2000  // UCAP_SYNC: open the UART listen window
 #define SBP_UCAP_CLOSE_EVT    0x4000  // UCAP_SYNC: close the window (miss if still open)
+#ifdef UCAP_P10
+// V25_P10: the P10 scheduler needs three more event bits; the 16-bit mask is
+// full, so reuse bits whose owners are compiled out of the IBSTH2P build
+// (enforced by the #error in config.h). SBP_UCAP_FRAME/OPEN/CLOSE_EVT keep
+// their values with P10 handlers (the UCAP_SYNC handlers compile out).
+#if defined(UCAP_SYNC) || defined(UCAP_PROBE)
+#error "UCAP_P10 is exclusive with UCAP_SYNC/UCAP_PROBE"
+#endif
+#define SBP_P10_EDGE_EVT      PIN_INPUT_EVT     // 0x0080: GPIO edge burst started (ISR/wake -> task)
+#define SBP_P10_VERIFY_EVT    SBP_PROBE_EVT     // 0x0800: 20 ms burst-verify timer
+#define SBP_P10_RECOVER_EVT   KEY_CHANGE_EVT    // 0x0200: force a known state
+#endif
 
 /*********************************************************************
  * MACROS

@@ -116,16 +116,22 @@
 // the 5-minute grab cycle — sensor data and the button byte are read from
 // every ~10.4 s main-MCU frame at a fraction of the old listening cost.
 // Mutually exclusive with the probe build, which owns the UART lock.
-#ifndef UCAP_PROBE
+#if !defined(UCAP_PROBE) && !defined(UCAP_P10)
 #define UCAP_SYNC	1
 #endif
-// Single source of the IBSTH2P firmware version: NN yields the "IBS-VNN"
+#if defined(UCAP_P10) && (defined(UCAP_SYNC) || defined(UCAP_PROBE))
+#error "UCAP_P10 is exclusive with UCAP_SYNC/UCAP_PROBE"
+#endif
+// Single source of the IBSTH2P firmware version: NN yields the "IBS-VNN"/"IBS-PNN"
 // Software Revision string and the BTHome firmware version object
 // (advertised as NN.0.0, see adv_set_data() in bthome_beacon.c).
-#define IBS_FW_VERSION	24
+#define IBS_FW_VERSION	25
 #ifdef UCAP_PROBE
 // 'X' instead of 'V' marks a probe image in the revision characteristic.
 #define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'X', '0' + (IBS_FW_VERSION / 10), '0' + (IBS_FW_VERSION % 10), 0}
+#elif defined(UCAP_P10)
+// 'P' marks the "P10 alone" edge-wake scheduler variant (ucap_p10.h).
+#define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'P', '0' + (IBS_FW_VERSION / 10), '0' + (IBS_FW_VERSION % 10), 0}
 #else
 #define DEF_SOFTWARE_REVISION	{'I', 'B', 'S', '-', 'V', '0' + (IBS_FW_VERSION / 10), '0' + (IBS_FW_VERSION % 10), 0}
 #endif
@@ -198,6 +204,9 @@
 		| SERVICE_RDS \
 		| SERVICE_BINDKEY \
 )
+#endif
+#if defined(UCAP_P10) && (DEV_SERVICES & (SERVICE_KEY | SERVICE_RDS | SERVICE_BUTTON | SERVICE_SCREEN))
+#error "UCAP_P10 reuses PIN_INPUT_EVT/KEY_CHANGE_EVT/SBP_PROBE_EVT; these services own them"
 #endif
 /*
 #define USE_TH_SENSOR	1
