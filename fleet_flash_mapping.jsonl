@@ -8,3 +8,5 @@
 {"stock_addr": "49:24:06:18:12:A9", "new_addr": "38:1F:8D:17:9B:AF", "new_name": "IBSTH2P-179BAF", "revision": "IBS-V23", "utc": "2026-07-23T06:31:27Z"}
 {"stock_addr": "49:24:06:18:17:BB", "new_addr": "38:1F:8D:F4:48:46", "new_name": "", "revision": "IBS-V23", "utc": "2026-07-23T06:38:12Z"}
 {"stock_addr": "49:24:06:18:15:2E", "new_addr": "38:1F:8D:01:52:4F", "new_name": "IBSTH2P-01524F", "revision": "IBS-V23", "utc": "2026-07-23T06:43:04Z"}
+{"stock_addr": "49:25:03:10:00:A1", "new_addr": "38:1F:8D:ED:61:73", "new_name": "", "revision": "IBS-V24", "utc": "2026-08-27T08:28:06Z"}
+{"stock_addr": "49:25:03:10:01:FC", "new_addr": "38:1F:8D:92:E4:85", "new_name": "IBSTH2P-92E485", "revision": "IBS-V24", "utc": "2026-09-02T07:04:48Z"}
