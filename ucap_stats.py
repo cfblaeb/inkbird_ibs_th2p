@@ -21,6 +21,9 @@ Reads (GATT char 0xFFF4, same channel frame_probe_monitor.py uses):
     CMD_ID_UTC_TIME      -> seconds since boot (clock is zeroed at reset and
                             nothing sets it in the field)
 Verdict: expected frames = uptime / 10.39 s. Catch = good/expected.
+    With --p10 on a V25_P10 image the baseline is uptime / (2 x measured T_est)
+    instead: that firmware listens for every SECOND frame by design, so the
+    10.39 s baseline reports a healthy unit as ~50 % and would trip Mode A.
     catch ~100 %, crc_bad ~0      -> scheduler locked, drain is NOT this
     catch 30-55 %, crc_bad ~0     -> Mode A (period outside ~9.9-10.9 s)
     crc_bad >~10 % of frames seen -> Mode B (corrupt frames)
@@ -73,7 +76,7 @@ async def read_p10(client, uptime):
     r8 = await query(client, [CMD_I2C_SCAN, 8], CMD_I2C_SCAN)
     if r5[1] != 0x5A or r6[1] != 0x5B or r7[1] != 0x5C or r8[1] != 0x5D:
         print("P10 ops not recognised (not a V25_P10 image?):", r5[:2].hex(), r6[:2].hex(), r7[:2].hex(), r8[:2].hex())
-        return
+        return None
     st, tsrc, t_est = r5[2], r5[3], u16(r5, 4)
     edges, glitches, windows, hits, misses, strays = (u16(r5, 6), u16(r5, 8), u16(r5, 10), u16(r5, 12), u16(r5, 14), u16(r5, 16))
     health, miss_streak = r5[18], r5[19]
@@ -99,6 +102,7 @@ async def read_p10(client, uptime):
     bad = bad_sleep or bad_wake or uart_fail or gpio_fail or recovers or sanity_rec
     print("VERDICT:", "diag counters non-zero -> read the plan's acceptance section" if bad else
           ("healthy P10 operation" if windows and hits / windows >= 0.9 else "low hit ratio -> check T_est/guard/rc_ct/last_hit_pos"))
+    return t_est if tsrc else None
 
 
 async def main():
@@ -135,12 +139,24 @@ async def main():
         temp = int.from_bytes(st[12:14], "little", signed=True) / 100
         humi = int.from_bytes(st[14:16], "little") / 100
         p10 = "--p10" in sys.argv[2:]
+        p10_t_est = None
         if p10:
-            await read_p10(client, uptime)
+            p10_t_est = await read_p10(client, uptime)
     finally:
         await client.disconnect()
 
-    expected = uptime / FRAME_PERIOD_S if uptime else 0
+    # V25_P10 opens ONE listen window per TWO frame periods by design, and it
+    # learns the real period itself — using FRAME_PERIOD_S here would report a
+    # healthy P10 unit as ~50 % catch and trip the Mode A branch below.
+    if p10 and p10_t_est:
+        period = p10_t_est / 1000.0
+        frames_per_window = 2
+        period_label = f"2 x {period:.3f} s measured (P10: one window per 2 periods)"
+    else:
+        period = FRAME_PERIOD_S
+        frames_per_window = 1
+        period_label = f"{FRAME_PERIOD_S} s"
+    expected = uptime / (frames_per_window * period) if uptime else 0
     seen = good + crc_bad
     print()
     print(f"uptime since boot   : {uptime} s ({uptime/3600:.1f} h)")
@@ -150,7 +166,7 @@ async def main():
     print(f"CRC-bad buffers     : {crc_bad}")
     print(f"last temp/humi      : {temp:.2f} C / {humi:.2f} %")
     if expected:
-        print(f"expected frames     : {expected:.0f}  (uptime / {FRAME_PERIOD_S} s)")
+        print(f"expected frames     : {expected:.0f}  (uptime / {period_label})")
         print(f"CATCH RATE          : {100*good/expected:.0f} % of expected frames")
     if seen:
         print(f"CORRUPTION          : {100*crc_bad/seen:.0f} % of frames seen in windows")
@@ -162,7 +178,10 @@ async def main():
     elif seen and crc_bad / seen >= 0.10:
         print("VERDICT: Mode B — significant CRC corruption on the inter-chip UART.")
     elif expected and good / expected < 0.6:
-        print("VERDICT: Mode A — low catch rate with clean frames: frame period outside the 9.9-10.9 s lock range.")
+        if p10:
+            print("VERDICT: P10 low catch rate with clean frames -> check misses/T_est/guard/last_hit_pos above.")
+        else:
+            print("VERDICT: Mode A — low catch rate with clean frames: frame period outside the 9.9-10.9 s lock range.")
     else:
         print("VERDICT: inconclusive — see numbers above.")
 

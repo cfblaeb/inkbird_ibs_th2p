@@ -1,1 +1,3 @@
 pyserial
+bleak
+dbus-fast
