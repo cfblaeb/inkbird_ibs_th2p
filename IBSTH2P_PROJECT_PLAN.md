@@ -825,11 +825,12 @@ every 10 s (`GAPROLE_CONNECTED` path, `thb2_main.c:1106-1108`) — connecting
 with e.g. nRF Connect is an ad-hoc "live button mode", though presses during
 the connection collapse into a single press event fired after disconnect.
 
-## V25_P10: "P10 alone" edge-wake UART scheduler (experiment build, pending hardware validation)
+## V25_P10: "P10 alone" edge-wake UART scheduler (experiment build, first hardware validation PASSED 2026-09-03)
 
 Written 2026-09-03 by the implementation agent (draft; owner wording pending).
 Branch `v25-p10` off `ad4c510` (V24). Implementation spec: SPEC_V25_P10.md
-(2026-09-02, session scratchpad, not in the repo). Not flashed to any unit yet.
+(2026-09-02, session scratchpad, not in the repo). First flashed and validated
+on hardware 2026-09-03 — see "First hardware validation" below.
 
 What it does: UART0 stays deinitialised and the chip sleeps at the floor; every
 ~10.4 s main-MCU frame's start bit wakes the PHY6222 through GPIO P10 (falling
@@ -921,6 +922,90 @@ diag counters (`bad_sleep/bad_wake/uart_fail/gpio_fail/recovers`) all 0,
 `rc_ct` in 7421..8203, note `wake_src_raw`. Anything else: read `st`,
 `t_est_ms`, `guard_ms`, `last_hit_pos_ms` (ideal ~118) before changing constants.
 Flash: `IBS_OTA_IMAGE=p10 python3 fleet_flash_custom.py 38:1F:8D:XX:XX:XX`.
+
+### First hardware validation (2026-09-03, bench unit 38:1F:8D:97:3B:39)
+
+Flashed ex-V23 (`IBS-V23`, not V24 — the OTA path is version-agnostic for custom
+firmware). 3364 blocks / 53812 bytes in 51 s, device verified its own full-image
+CRC32, post-flash Software Revision `IBS-P25`, flasher exit 0 after one failed
+connect before the power-cycle window opened.
+
+Acceptance read at 4282 s (1.2 h), fresh cells: **PASS on every criterion.**
+```
+state SUSPENDED   T_est 10704 ms (hit)   guard 100 ms   miss_streak 0
+edges 202  glitches 0  strays 3  windows 202  hits 199 (CRC-bad 0)  misses 3
+health 100 % over last 32 windows (hist 0xffffffff)   last_hit_pos 128 ms   last_dt 10704 ms
+wakes_io 204  irq_total 5719  wake_src_raw 0x00000000  rc_ct 7772
+diag: stale 0 frame_oos 0 partial_at_close 0 win_aborted 0 connects 2 resumes 1
+      recovers 0 sanity_recovers 0 bad_sleep 0 bad_wake 0 uart_fail 0 gpio_fail 0 anchor_valid 0
+```
+`edges ~ windows ~ hits` (202/202/199 against ~200 expected); all 3 misses were
+at startup with **zero** in the 51 min between the 10 min and 1.2 h reads;
+`glitches` 0, so the 20 ms / >=4-edge frame test is correct for this hardware and
+`P10_VERIFY_MIN_EDGES` needs no change; `rc_ct` 7768 -> 7772, converged and in
+band; every diag counter 0 (`connects` 2 / `resumes` 1 are the two GATT reads).
+`health` reached 100 at ~11.8 min uptime and held for the rest of the hour.
+Pack voltage flat at 2.676-2.677 V over 46 min, which rules out a 1-2 mA lock
+leak without a meter.
+
+Four corrections to this section's own expectations:
+
+1. **`wake_src_raw` reads 0x00000000, not the expected 0x00000400** (bit 10),
+   at both the 10 min and 1.2 h reads. The AON wake-source register does NOT
+   follow pad numbering on this silicon. P10 wake itself is fine — 202 edges,
+   199 hits, `wakes_io` 204 — so only the *reporting* register is dead. It is
+   unusable as a wake-source discriminator; any future code branching on it
+   will break. This answers the open hardware question in the acceptance list.
+
+2. **`strays == button presses` should read `strays == 2 x presses`.** One
+   physical press took `strays` 1 -> 3. The button reaches the chip only through
+   the UART frame (`btn_clicks` counts *changes* to frame byte [8],
+   `cmd_parser.c:390-400`; there is no button GPIO in this build, `config.h:208`
+   `#error`s if the KEY/BUTTON services are enabled alongside `UCAP_P10`), and
+   press and release each flip that byte. A `stray` is a verified off-schedule
+   frame arriving in `WAIT_OPEN` (`ucap_p10.h:228-229`) — exactly the
+   button-triggered extra frame that `P10_T_MIN_MS 7000` already exists to keep
+   out of the period learner.
+
+3. **A button press looks like a ~60 s advertising outage to any pid-based
+   analysis, and is not one.** `BTN_ADV_HOLD = 6` (`thb2_main.c:250-298`)
+   deliberately freezes the packet id and repeats the identical payload for 6
+   advertising events so HA fires exactly one press event. Both
+   `bthome_catch_log.py` and ad-hoc scanners deduplicate on packet id, so the
+   frozen-id repeats are invisible: observed pid 126 -> 127 across 60.1 s, which
+   is exactly 6 x the 10 s interval. Two real consequences: sensor updates are
+   suppressed for the whole hold (~60-70 s per press, the early `return` skips
+   the measurement refresh), and every click re-arms `hold` with no ceiling, so
+   byte [8] flapping for a non-button reason would freeze sensor advertising for
+   as long as it flaps.
+
+4. **Time-to-first-data overshot the predicted 21-25 s on both boots**: 29.7-34.4 s
+   (1 startup miss) and 43.9 s (3 startup misses). The overshoot scales with the
+   number of startup window misses, and the fresh-cell boot was the slower of the
+   two, so it is not a battery effect. Consistent with the `rc_ct` caveat above
+   (the first ~1 min after boot is uncorrected), which already warns the ~23 s
+   expectation will not hold on a unit whose RC32K is off.
+
+`T_est` settled at 10704 ms, +314 ms on the 10390 ms seed, and drifted up 126 ms
+over the hour (`last_hit_pos` tracking it, 111 -> 128 ms against an ideal 118).
+This unit's true frame period is therefore ~10.70 s, near the top of the old
+9.9-10.9 s lock range that V21-V24 had to assume — an argument for the P10
+design, which learns the period instead of assuming it. Worth checking whether
+`T_est` keeps climbing past 10.9 s over a longer soak.
+
+Tooling fixed in the same session: `ucap_stats.py` computed `expected frames =
+uptime / 10.39` and so scored a healthy P10 unit at ~48 %, tripping the Mode A
+branch on every read. With `--p10` the baseline is now
+`uptime / (2 x measured T_est)` — P10 listens for every second frame by design —
+and the Mode A verdict no longer applies to P10 images. The two reads above
+re-score 47 % -> 96 % and 48 % -> 99 %. `requirements.txt` also gained `bleak`
+and `dbus-fast`, which the BLE scripts have always needed.
+
+Not established: one reboot on the old cells ~3-5 min after the flash, at 2.19 V,
+inside the 2.1-2.2 V brownout band (see the empirical thresholds above).
+Brownout is the leading candidate; the button-hold mechanism cannot cause a
+reset. Zero reboots across the full 1.2 h on fresh cells, confirmed by continuous
+pid tracking (the pid 255 -> 3 transition is a uint8 wrap at a clean 10.0 s/adv).
 
 State machine (`ucap_p10.h`, task context only; glue executes an action mask
 in fixed bit order: stops -> unlocks -> UART off -> GPIO arm -> UART on ->
