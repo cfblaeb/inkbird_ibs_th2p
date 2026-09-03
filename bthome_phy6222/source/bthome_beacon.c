@@ -75,6 +75,13 @@ uint8_t adv_set_data(void * pd) {
 	p->temperature = measured_data.temp; // x0.01 C
 	p->h_id = BtHomeID_humidity;
 	p->humidity = measured_data.humi; // x0.01 %
+#ifdef UCAP_P10
+	{
+		extern volatile uint8_t p10_health;
+		p->c_id = BtHomeID_count8;   // 0x09, already in the enum (bthome_beacon.h:29)
+		p->count8 = p10_health;
+	}
+#endif
 	p->v_id = BtHomeID_voltage;
 	p->battery_mv = measured_data.battery_mv; // x mV
 	uint8_t len = sizeof(adv_bthome_data1_t);
@@ -102,7 +109,10 @@ uint8_t adv_set_data(void * pd) {
 		// required ascending object order. Mutually exclusive with the button object above:
 		// that bounds the worst-case advertisement (encrypted build,
 		// 8 bytes counter+MIC overhead) at exactly the 31-byte legacy
-		// limit; the plain build stays at 25 bytes. The version returns
+		// limit; the plain build stays at 25 bytes. Under UCAP_P10 the
+		// 0x09 count object adds 2 bytes: plain build 27 bytes steady
+		// (25 during the button hold); the encrypted path would be 33
+		// bytes, but it is not built for IBSTH2P. The version returns
 		// with the first post-burst packet, so it is only absent for the
 		// ~60 s button hold.
 		uint8_t *b = (uint8_t *)pd + len;

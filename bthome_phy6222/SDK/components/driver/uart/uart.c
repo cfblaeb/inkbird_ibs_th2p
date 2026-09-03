@@ -219,7 +219,8 @@ static int uart_hw_deinit(UART_INDEX_e uart_index)
     }
 
     NVIC_DisableIRQ(irq_type);
-    hal_gpio_fmux(m_uartCtx[uart_index].cfg.tx_pin,Bit_DISABLE);
+    if(m_uartCtx[uart_index].cfg.tx_pin != GPIO_DUMMY)
+        hal_gpio_fmux(m_uartCtx[uart_index].cfg.tx_pin,Bit_DISABLE);
     hal_gpio_fmux(m_uartCtx[uart_index].cfg.rx_pin,Bit_DISABLE);
     cur_uart->LCR=0x80;
     cur_uart->DLM=0;
@@ -275,7 +276,8 @@ static int uart_hw_init(UART_INDEX_e uart_index)
 //      hal_gpio_fmux(P9, Bit_DISABLE);
 //      hal_gpio_fmux(P10, Bit_DISABLE);
 //  }
-    hal_gpio_pull_set(pcfg->tx_pin, GPIO_PULL_UP);
+    if(pcfg->tx_pin != GPIO_DUMMY)
+        hal_gpio_pull_set(pcfg->tx_pin, GPIO_PULL_UP);
     hal_gpio_pull_set(pcfg->rx_pin, GPIO_PULL_UP);
     hal_gpio_fmux_set(pcfg->tx_pin, fmux_tx);
     hal_gpio_fmux_set(pcfg->rx_pin, fmux_rx);

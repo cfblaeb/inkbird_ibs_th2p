@@ -67,6 +67,8 @@ In pack_cfg_fmem() the destination pointer is set once (`wraddr = fnewseg + 4;`,
 
 *Status: **FIXED in V23.** **CONFIRMED** (code trace, V22) — one defect complex with #4 and #5.*
 
+*Status update 2026-09-03: the "FIXED in V23" line above was wrong for the `uart.c` GPIO_DUMMY defect described at the end of this entry (V23/V24 `uart.c` still called `hal_gpio_pull_set(GPIO_DUMMY)` at `uart_hw_init` and `hal_gpio_fmux(GPIO_DUMMY)` at `uart_hw_deinit`). The `GPIO_DUMMY` guards landed in branch `v25-p10` (`SDK/components/driver/uart/uart.c`, unconditional, both V25 build lines; disassembly of `uart_hw_deinit` checked). Not yet in any flashed image.*
+
 Verified trace: `set_new_adv_interval()` (thb2_main.c:220) is a non-atomic
 "bounce": it queues `GAP_EndDiscoverable`, then directly fakes
 `gapRole_state = GAPROLE_WAITING_AFTER_TIMEOUT` and counts
