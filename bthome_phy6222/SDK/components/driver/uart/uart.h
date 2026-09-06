@@ -63,7 +63,13 @@ extern "C" {
 #define USR_TFNF  0x02
 #define USR_BUSY  0x01
 
-#define UART_FIFO_RX_TRIGGER    FCR_RX_TRIGGER_10//FCR_RX_TRIGGER_10//FCR_RX_TRIGGER_11
+#ifdef UCAP_P03
+/* V26_P03: one RX interrupt per byte so the first-byte stamp (P03 lead measurement) is byte 1,
+ * not byte 8 (the default half-FIFO trigger delays the first RX IRQ by ~8 ms at 9600 baud). */
+#define UART_FIFO_RX_TRIGGER  FCR_RX_TRIGGER_00
+#else
+#define UART_FIFO_RX_TRIGGER    FCR_RX_TRIGGER_10
+#endif//FCR_RX_TRIGGER_10//FCR_RX_TRIGGER_11
 #define UART_FIFO_TX_TRIGGER    FCR_TX_TRIGGER_00//FCR_TX_TRIGGER_00//FCR_TX_TRIGGER_01
 
 typedef enum

@@ -25,6 +25,7 @@ import os, re
 IMAGES = {
     "v24": "BOOT_IBSTH2P_v24_ota.bin",        # default, fleet release
     "p10": "BOOT_IBSTH2P_v25_p10_ota.bin",    # V25 "P10 alone" experiment (IBS-P25)
+    "p03": "BOOT_IBSTH2P_v26_p03_ota.bin",    # V26 "P03 wake-line" receiver + lead measurement (IBS-W26)
 }
 IMAGE = os.environ.get("IBS_OTA_IMAGE", "v24")
 if IMAGE not in IMAGES:
@@ -87,7 +88,7 @@ async def main():
         return 0
     try:
         rev = (await client.read_gatt_char(SW_REV_CHAR)).decode()
-        m = re.search(rb"IBS-[VXP]\d\d", open(OTA_BIN, "rb").read())
+        m = re.search(rb"IBS-[VXPW]\d\d", open(OTA_BIN, "rb").read())
         expect = m.group().decode() if m else OTA_BIN.stem
         print(f"post-flash Software Revision: {rev} "
               f"{f'— {expect} CONFIRMED' if expect in rev else '— UNEXPECTED!'}",

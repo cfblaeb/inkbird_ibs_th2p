@@ -120,8 +120,8 @@ typedef struct __attribute__((packed)) _adv_bthome_data1_t {
 	int16		temperature; // x 0.01 degree
 	uint8		h_id;	// = BtHomeID_humidity
 	uint16		humidity; // x 0.01 %
-#ifdef UCAP_P10
-	uint8		c_id;	// = BtHomeID_count8 (0x09): P10 listen-window health, % of last <=32 windows with a CRC-good frame
+#if defined(UCAP_P10) || defined(UCAP_P03)
+	uint8		c_id;	// = BtHomeID_count8 (0x09): P10: listen-window health % ; P03: P03-edge -> first-byte lead in ms
 	uint8		count8;
 #endif
 	uint8		v_id;	// = BtHomeID_voltage

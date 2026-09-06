@@ -81,6 +81,12 @@ uint8_t adv_set_data(void * pd) {
 		p->c_id = BtHomeID_count8;   // 0x09, already in the enum (bthome_beacon.h:29)
 		p->count8 = p10_health;
 	}
+#elif defined(UCAP_P03)
+	{
+		extern volatile uint8_t p03_lead_ms;
+		p->c_id = BtHomeID_count8;   // 0x09: P03 edge -> first UART byte, ms (255 = none yet)
+		p->count8 = p03_lead_ms;
+	}
 #endif
 	p->v_id = BtHomeID_voltage;
 	p->battery_mv = measured_data.battery_mv; // x mV

@@ -282,7 +282,7 @@ async def main():
     # works for images whose revision letter does not match the file version
     # (v25_p10 -> IBS-P25). Same idea as fleet_flash_custom.py, which greps the
     # OTA binary.
-    revs = sorted(set(re.findall(rb"IBS-[VXP]\d\d",
+    revs = sorted(set(re.findall(rb"IBS-[VXPW]\d\d",
                                  b"".join(part.data for part in parts))))
     expect = revs[0].decode() if len(revs) == 1 else None
     if expect is None:

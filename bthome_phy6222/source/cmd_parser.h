@@ -132,6 +132,19 @@ uint8_t ucap_p10_connected(void);   // 1 while SUSPENDED (connection up)
 void ucap_p10_sanity(void);         // lost-timer / leaked-lock sweep, from adv_measure()
 extern volatile uint8_t p10_health; // BTHome 0x09 value, task-context snapshot
 #endif
+#ifdef UCAP_P03
+// V26_P03 "P03 wake" receiver (task context; see cmd_parser.c / ucap_p03.h)
+void ucap_p03_edge_evt(void);
+void ucap_p03_rx_evt(void);
+void ucap_p03_frame_evt(void);
+void ucap_p03_timeout_evt(void);
+void ucap_p03_recover_evt(void);
+void ucap_p03_connect(void);        // GAPROLE_CONNECTED
+void ucap_p03_disconnect(void);     // GAPROLE_WAITING[_AFTER_TIMEOUT]; no-op unless suspended
+uint8_t ucap_p03_connected(void);   // 1 while SUSPENDED (connection up)
+void ucap_p03_sanity(void);         // lost-timer / leaked-lock sweep, from adv_measure()
+extern volatile uint8_t p03_lead_ms; // BTHome 0x09 value: P03 edge -> first byte, ms (255 = none yet)
+#endif
 #endif
 
 #ifdef __cplusplus
