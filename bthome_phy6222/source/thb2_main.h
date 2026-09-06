@@ -85,6 +85,16 @@ extern "C"
 #define SBP_P10_VERIFY_EVT    SBP_PROBE_EVT     // 0x0800: 20 ms burst-verify timer
 #define SBP_P10_RECOVER_EVT   KEY_CHANGE_EVT    // 0x0200: force a known state
 #endif
+#ifdef UCAP_P03
+// V26_P03: same bit-reuse scheme as V25_P10 (owners compiled out, enforced in config.h).
+#if defined(UCAP_SYNC) || defined(UCAP_PROBE) || defined(UCAP_P10)
+#error "UCAP_P03 is exclusive with UCAP_SYNC/UCAP_PROBE/UCAP_P10"
+#endif
+#define SBP_P03_EDGE_EVT      PIN_INPUT_EVT     // 0x0080: P03 rising edge stamped (IRQ/wake -> task)
+#define SBP_P03_RX_EVT        SBP_UCAP_OPEN_EVT // 0x2000: first UART byte of a burst stamped
+#define SBP_P03_TIMEOUT_EVT   SBP_UCAP_CLOSE_EVT// 0x4000: no complete frame after the edge
+#define SBP_P03_RECOVER_EVT   KEY_CHANGE_EVT    // 0x0200: force a known state
+#endif
 
 /*********************************************************************
  * MACROS

@@ -268,6 +268,8 @@ static void adv_measure(void) {
 		get_utc_time_sec(); // счет UTC timestamp
 #ifdef UCAP_P10
 		ucap_p10_sanity();     // lost-timer / leaked-lock sweep, every advertising event
+#elif defined(UCAP_P03)
+		ucap_p03_sanity();     // ARMED older than 2 s = lost timer -> RECOVER
 #endif
 #if DEVICE == DEVICE_IBSTH2P
 		{
@@ -869,11 +871,24 @@ uint16_t BLEPeripheral_ProcessEvent( uint8_t task_id, uint16_t events )
 	if( events & SBP_UCAP_OPEN_EVT)   { ucap_p10_open_evt();    return ( events ^ SBP_UCAP_OPEN_EVT); }
 	if( events & SBP_P10_EDGE_EVT)    { ucap_p10_edge_evt();    return ( events ^ SBP_P10_EDGE_EVT); }
 #endif
+#ifdef UCAP_P03
+	// V26_P03 receiver. Priority: RECOVER, then EDGE and RX_START (stamps) before
+	// FRAME (so a frame is judged with its stamps registered), TIMEOUT last (a
+	// frame pending alongside its timeout is a hit; the timeout is then stale).
+	if( events & SBP_P03_RECOVER_EVT) { ucap_p03_recover_evt(); return ( events ^ SBP_P03_RECOVER_EVT); }
+	if( events & SBP_P03_EDGE_EVT)    { ucap_p03_edge_evt();    return ( events ^ SBP_P03_EDGE_EVT); }
+	if( events & SBP_P03_RX_EVT)      { ucap_p03_rx_evt();      return ( events ^ SBP_P03_RX_EVT); }
+	if( events & SBP_UCAP_FRAME_EVT)  { ucap_p03_frame_evt();   return ( events ^ SBP_UCAP_FRAME_EVT); }
+	if( events & SBP_P03_TIMEOUT_EVT) { ucap_p03_timeout_evt(); return ( events ^ SBP_P03_TIMEOUT_EVT); }
+#endif
 	if( events & TIMER_BATT_EVT) {
 #ifdef UCAP_P10
 		// Audit #13: a timer expiry already posted survives osal_stop_timerEx at
 		// disconnect. Only the connected loop may re-arm this timer.
 		if (!ucap_p10_connected())
+			return ( events ^ TIMER_BATT_EVT);
+#elif defined(UCAP_P03)
+		if (!ucap_p03_connected())
 			return ( events ^ TIMER_BATT_EVT);
 #endif
 		LOG("TIMER_EVT\n");
@@ -1178,6 +1193,8 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 			// Trigger first measurement quickly (10 sec), then every 5 min
 #ifdef UCAP_P10
 			ucap_p10_connect();     // suspend the P10 flow; UART on unlocked for the connection
+#elif defined(UCAP_P03)
+			ucap_p03_connect();     // release our UART lock; MOD_USR0 holds the chip awake, UART stays on
 #else
 			ucap_start_grab();
 #endif
@@ -1221,6 +1238,8 @@ static void peripheralStateReadRssiCB( int8_t	 rssi )
 			// No-op unless the machine is SUSPENDED (a WAITING without a
 			// preceding CONNECTED must not disturb a live P10 cycle).
 			ucap_p10_disconnect();
+#elif defined(UCAP_P03)
+			ucap_p03_disconnect();  // back to IDLE (no-op unless SUSPENDED)
 #endif
 			// Allow sleep again after disconnect
 			hal_pwrmgr_unlock(MOD_USR0);

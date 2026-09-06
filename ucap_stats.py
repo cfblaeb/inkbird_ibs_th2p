@@ -8,6 +8,7 @@ Usage:
     python3 ucap_stats.py 38:1F:8D:17:9B:AF          # Thermo ES
     python3 ucap_stats.py 38:1F:8D:DA:BA:20          # 204-FR2
     python3 ucap_stats.py <MAC> --p10                # also read V25_P10 scheduler counters (GATT ops 5-8)
+    python3 ucap_stats.py <MAC> --p03                # also read V26_P03 wake-line receiver counters (GATT ops 9-11)
 
 Connecting: the units advertise every 10 s, which the Linux kernel's 4 s
 create-connection limit cannot catch. Either (a) run inside the 60 s fast
@@ -105,6 +106,58 @@ async def read_p10(client, uptime):
     return t_est if tsrc else None
 
 
+P03_STATES = {0: "IDLE", 1: "ARMED", 2: "SUSPENDED"}
+P03_BINS = ["<1 ms", "1-2", "2-3", "3-5", "5-8", "8-12", "12-20", ">=20 ms"]
+
+
+async def read_p03(client, uptime):
+    """V26_P03 telemetry: CMD_ID_I2C_SCAN ops 9-11 (marker bytes 0x5E/0x5F/0x60)."""
+    r9 = await query(client, [CMD_I2C_SCAN, 9], CMD_I2C_SCAN)
+    r10 = await query(client, [CMD_I2C_SCAN, 10], CMD_I2C_SCAN)
+    r11 = await query(client, [CMD_I2C_SCAN, 11], CMD_I2C_SCAN)
+    if r9[1] != 0x5E or r10[1] != 0x5F or r11[1] != 0x60:
+        print("P03 ops not recognised (not a V26_P03 image?):", r9[:2].hex(), r10[:2].hex(), r11[:2].hex())
+        return
+    st, rise_src = r9[2], r9[3]
+    rises, rises_wake, rx_starts, rx_no_edge = u16(r9, 4), u16(r9, 6), u16(r9, 8), u16(r9, 10)
+    frames, frames_bad, frames_no_edge, timeouts = u16(r9, 12), u16(r9, 14), u16(r9, 16), u16(r9, 18)
+    lead_last, lead_min, lead_max = u16(r10, 2), u16(r10, 4), u16(r10, 6)
+    high_last, wake_lat, done_last = u16(r10, 8), u16(r10, 10), u16(r10, 12)
+    io_wakes, falls, lead_ms, packed = u16(r10, 14), u16(r10, 16), r10[18], r10[19]
+    stale = packed >> 4                      # op10[19] = min(stale,15)<<4 | min(rise_after_rx+lead_rejected,15)
+    r12 = await query(client, [CMD_I2C_SCAN, 12], CMD_I2C_SCAN)
+    hist = list(r11[2:10])
+    connects, resumes, recovers, sanity_rec, wakes_unknown = r11[10], r11[11], u16(r11, 12), u16(r11, 14), u16(r11, 16)
+    bad_sleep, flags = r11[18], r11[19]
+    falls_wake = frames_bad_armed = rise_after_rx = lead_rejected = stale16 = 0
+    if len(r12) >= 20 and r12[1] == 0x61:
+        falls_wake, frames_bad_armed, rise_after_rx, lead_rejected, stale16, _wu = (u16(r12, 2), u16(r12, 4), u16(r12, 6), u16(r12, 8), u16(r12, 10), u16(r12, 12))
+    t = lambda v: "n/a" if v in (0, 0xFFFF) else f"{v/10:.1f} ms"
+    print()
+    print("=== V26_P03 wake-line receiver ===")
+    print(f"state {P03_STATES.get(st, st)}   last rise source {'wake-hook' if rise_src else 'GPIO IRQ'}")
+    print(f"P03 rises {rises} (via wake hook {rises_wake})   falls {falls} (fall-wakes {falls_wake})   io_wakes {io_wakes}   unknown-source wakes {wakes_unknown}")
+    print(f"frames {frames} (CRC-bad {frames_bad}, without edge {frames_no_edge})   rx-starts {rx_starts} (without edge {rx_no_edge})   timeouts {timeouts}")
+    print(f"LEAD P03 edge -> first byte: last {t(lead_last)}  min {t(lead_min)}  max {t(lead_max)}   (BTHome 0x09 = {lead_ms} ms)")
+    print(f"P03 high time (last) {t(high_last)}   wake -> IRQ-live (last) {t(wake_lat)}   first byte -> frame done (last) {t(done_last)}")
+    print("lead histogram: " + "  ".join(f"{b}:{n}" for b, n in zip(P03_BINS, hist)))
+    print(f"diag: stale {stale16 or stale} connects {connects} resumes {resumes} recovers {recovers} sanity_recovers {sanity_rec} bad_sleep {bad_sleep} repair_pending {flags & 1} gpio_fail {(flags >> 1) & 1}")
+    print(f"      CRC-bad completions that kept the lock {frames_bad_armed}   rise-after-first-byte {rise_after_rx}   implausible leads rejected {lead_rejected}")
+    print("lead is measured to the END of byte 1 minus 1.04 ms (1-char FIFO trigger); P03 high time needs the fall IRQ (see falls)")
+    if uptime:
+        print(f"expected frames at uptime {uptime} s: ~{uptime/10.4:.0f} (every frame); observed {frames}")
+    if frames:
+        print(f"EDGE COVERAGE {100*(frames-frames_no_edge)/frames:.0f} % of frames had a P03 edge before them; CRC-bad {100*frames_bad/frames:.0f} %")
+    if lead_min not in (0, 0xFFFF):
+        v = ("lead >= 3 ms: P03 wake with UART kept initialised catches the first byte (stock-style) -> P03 design viable"
+             if lead_min >= 30 else
+             "lead < 3 ms: P03 is (nearly) simultaneous with the start bit -> little gain over P10")
+        print("VERDICT:", v)
+    if recovers or sanity_rec or bad_sleep or (flags & 3):
+        print("WARNING: diag counters non-zero -> lock/timer path misbehaved; report the full printout")
+    return frames
+
+
 async def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -142,6 +195,8 @@ async def main():
         p10_t_est = None
         if p10:
             p10_t_est = await read_p10(client, uptime)
+        if "--p03" in sys.argv[2:]:
+            await read_p03(client, uptime)
     finally:
         await client.disconnect()
 

@@ -1094,6 +1094,76 @@ Residual risks, only resolvable on hardware (spec section 13):
 - `uart_hw_deinit` disassembly (gcc 14.2) checked: `hal_gpio_fmux` call is
   guarded by `cmp r0, #255`; no unconditional GPIO_DUMMY path remains.
 
+## V26_P03: "P03 wake-line" receiver + P03->frame lead measurement (experiment build, pending hardware validation)
+
+Build define `-DUCAP_P03=1` (exclusive with UCAP_SYNC/UCAP_PROBE/UCAP_P10); Software Revision
+`IBS-W26` ('W' = wake line), BTHome 0xF2 = 26.0.0. `IBS_FW_VERSION` is 26 for the whole tree,
+so a P10 rebuild now reads `IBS-P26` (the committed v25_p10 artifacts are untouched).
+Artifacts: `inkbird_fw/BOOT_IBSTH2P_v26_p03.hex` (sha256 `efa790cf42e3be348a3c4169e1104439b094c15bed58dd4fedaa326f092506db`),
+`inkbird_fw/BOOT_IBSTH2P_v26_p03_ota.bin` (sha256 `112b16306a9dddd3fe995dcc25033eef7733a3ab175d58f6e98575ea69100f70`). Flash:
+`IBS_OTA_IMAGE=p03 python3 fleet_flash_custom.py 38:1F:8D:XX:XX:XX`. Read out:
+`python3 ucap_stats.py <MAC> --p03` (GATT ops 9-12); BTHome 0x09 = last P03->first-byte lead in ms
+(255 = none yet).
+
+### Why
+Static analysis of the stock image (`orig/orig.bin`; write-up in
+`freezer_battery_data/v25_p10_design/STOCK_FIRMWARE_WAKE_MECHANISM.md`): the main MCU raises
+**P03** before each UART frame; stock's only GPIO interrupt is P03 rising (handler `0x1fff583d`
+locks MOD_UART0), it keeps UART0 initialised across sleep, and releases the lock after a parsed
+frame or when exactly 11 bytes are pending in its ring (no timeout — the likely cause of stock's
+episodic full-awake drain on units with a marginal UART stream). V15-V25 configure P03 as a
+pulled-down GPIO and ignore it. This build uses the wake line the way stock does, with a sane
+release policy, and measures whether the P03 lead is long enough for our wake path.
+
+### Mechanism (`source/ucap_p03.h` state machine IDLE/ARMED/SUSPENDED; glue in `cmd_parser.c`)
+- UART0 initialised once in `ucap_init`, never deinitialised (SDK `uart_wakeup_process_0` re-inits it
+  after every sleep; safe since the uart.c GPIO_DUMMY guards). RX FIFO trigger is 1 char under
+  UCAP_P03 (`uart.h`) so the first RX interrupt is byte 1, not byte 8.
+- P03: `hal_gpioin_register(GPIO_P03, rise_cb, fall_cb)`, pull-down. Rising edge (IRQ, or synthesised
+  at wake, or an IO wake with P03 read HIGH in the MOD_USR1 hook) -> `hal_pwrmgr_lock(MOD_UART0)`
+  immediately + EDGE event; task arms a 250 ms timeout. First RX byte also locks (edge missed case).
+  An IO wake with P03 LOW is "unknown" (P10 start bit or a finished pulse): locks, but is not a lead
+  anchor; an IO wake within 5 ms after a P03 fall is the fall itself: no lock.
+- Release: CRC-good frame -> IDLE (unlock, framer reset). CRC-bad completion -> stay ARMED, re-arm the
+  timeout (bytes may still be in flight). TIMEOUT -> IDLE. Never by byte count.
+- Connections: CONNECT -> SUSPENDED (our lock released, UART on, MOD_USR0 holds the chip);
+  WAITING -> IDLE. `adv_measure` sanity sweep: ARMED > 2 s -> RECOVER. Legacy grab sites are no-ops.
+- Event priority: RECOVER, EDGE, RX_START, FRAME, TIMEOUT.
+
+### Telemetry (all LE, 20-byte replies)
+- op 9  `0x5E`: st, rise_src, rises, rises_wake, rx_starts, rx_no_edge, frames, frames_bad, frames_no_edge, timeouts
+- op 10 `0x5F`: lead_last/min/max, high_last, wake_lat_last, done_last (all 0.1 ms), io_wakes, falls, lead_ms, stale<<4|rejected
+- op 11 `0x60`: lead histogram (8 bins: <1,<2,<3,<5,<8,<12,<20,>=20 ms), connects u8, resumes u8, recovers, sanity_recovers, wakes_unknown, bad_sleep, flags
+- op 12 `0x61`: falls_wake, frames_bad_armed, rise_after_rx, lead_rejected, stale, wakes_unknown, t_rise_any
+- lead = (first byte received) - (P03 rise) - 1.04 ms (byte-1 duration). wake_lat = P03 IRQ stamp -
+  `g_wakeup_rtc_tick` when the rise followed a wake. high = P03 fall - latest rise (needs the fall IRQ,
+  so a pulse shorter than the wake path shows 0/n.a. and `rises_wake` > 0).
+
+### How to read the first result
+- `frames` ~ uptime/10.4 and `frames_no_edge` ~ 0: every frame is announced on P03.
+- `lead_min` >= 3 ms: a P03-woken chip with UART kept initialised catches byte 1 with margin (stock's
+  design works for us); 1-3 ms: marginal (compare with `wake_lat_last`); < 1 ms or `rises` ~ 0 with
+  `wakes_unknown` ~ frames: P03 does not lead the frame usefully -> V25_P10 stays the design.
+- `frames_bad` should be ~0; `timeouts` counts edges/first-bytes with no complete frame; all diag
+  counters (recovers, sanity_recovers, bad_sleep, repair_pending, gpio_fail) must be 0.
+- Power (no meter): pack-voltage slope in HA over days vs a V24/V25 unit; expected ~0.2 % awake duty.
+
+### Host tests
+`tests/test_ucap_p03.c` (48 checks: arm/lock/release, timeout, rx-without-edge, CRC-bad keeps lock,
+unknown/fall wake attribution, rise-after-rx rejection, 24-bit wrap and overflow-free conversion,
+connect/disconnect/recover/sanity, histogram bins + saturation, 1000-period sim). Build:
+`gcc -Wall -Wextra -std=gnu11 -fsanitize=address,undefined -o test_ucap_p03 test_ucap_p03.c && ./test_ucap_p03`.
+Two independent code reviews (lock/sleep safety; conformance) found no lock-leak path; their
+findings (FIFO trigger, wake attribution, CRC-bad release, overflow, fall-wake) are fixed above.
+
+### Known limits
+- Both P03 edges are IRQ-registered; the SDK re-derives polarity from the pin level, so a pulse that
+  ends before the wake handler runs yields no fall IRQ (high time unmeasured) — `rises_wake` shows it.
+- P10 remains an AON wake source (SDK fmux_set leaves it input-assigned): harmless, its start-bit wake
+  is booked as an unknown-source wake and still holds the chip awake for the frame.
+- The debug UART-scan GATT op (pre-existing) muxes P10 away and would break RX until the next wake.
+
+
 ## Next Work
 
 1. Measure battery behavior of V16+ (early UART sleep-release) against the

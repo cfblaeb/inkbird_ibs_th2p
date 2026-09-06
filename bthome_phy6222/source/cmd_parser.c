@@ -79,6 +79,9 @@ extern gapPeriConnectParams_t periConnParameters;
 #ifdef UCAP_P10
 #include "ucap_p10.h"
 #endif
+#ifdef UCAP_P03
+#include "ucap_p03.h"
+#endif
 
 #define FRAME_SIZE  UCAP_FRAME_SIZE
 
@@ -87,7 +90,7 @@ extern gapPeriConnectParams_t periConnParameters;
 static uint8_t rawcap_buf[RAWCAP_SIZE];
 static volatile uint8_t rawcap_pos = 0;
 
-#if defined(UCAP_PROBE) || defined(UCAP_SYNC) || defined(UCAP_P10)
+#if defined(UCAP_PROBE) || defined(UCAP_SYNC) || defined(UCAP_P10) || defined(UCAP_P03)
 // Raw RTC counter read (AP_AON->RTCCNT, 24-bit @32768 Hz, wraps every
 // 512 s — delta consumers handle wrap with 24-bit modular arithmetic).
 // Self-contained and ISR-safe; same double-read pattern as the reference
@@ -372,6 +375,135 @@ static void p10_put32(uint8_t *d, uint32_t v) { p10_put16(d, (uint16_t)v); p10_p
 #endif /* UCAP_P10 */
 
 // Consume a frame already validated (marker + CRC) by ucap_frame_feed().
+#ifdef UCAP_P03
+/* ======================= V26_P03: "P03 wake" receiver =======================
+ * See ucap_p03.h. UART0 stays initialised for the life of the firmware (the
+ * SDK re-inits it in uart_wakeup_process_0 after every sleep). P03 is a
+ * pulled-down GPIO input with rising+falling edge IRQs; the main MCU raises
+ * it before each frame. The MOD_UART0 sleep-lock is taken in IRQ/hook context
+ * as early as possible (stock does the same) and released by the task-context
+ * FRAME handler or the timeout. Telemetry: GATT ops 9-11, BTHome 0x09 = lead ms.
+ */
+static ucap_p03_t p03;                  /* scheduler state: task context only */
+volatile uint8_t p03_lead_ms;           /* task-context snapshot read by bthome_beacon.c */
+static volatile struct {
+	uint32_t t_rise, t_rise_any, t_fall, t_first, t_wake, frame_tick;   /* t_rise_any: latest rise, never cleared (P03 high time) */
+	uint16_t io_wakes, falls, falls_wake, high_last_100us, wake_lat_last_100us;
+	uint8_t  burst_open;     /* first byte of the current burst stamped */
+	uint8_t  rise_pending;   /* rise stamped and EDGE posted, not yet consumed by the task */
+	uint8_t  rise_src, frame_ok, repair_pending, bad_sleep, gpio_fail;
+} p03_hw;
+extern uint32_t g_wakeup_rtc_tick;      /* ROM SRAM global (0x1fff0a10), set in wakeupProcess1 before app hooks */
+
+static void p03_rise_cb(gpio_pin_e pin, gpio_polarity_e type)
+{
+	(void)pin; (void)type;
+	uint32_t t = ucap_rtc();
+	p03_hw.t_rise_any = t;
+	if (!p03_hw.rise_pending) {
+		p03_hw.t_rise = t; p03_hw.rise_src = P03_SRC_IRQ; p03_hw.rise_pending = 1;
+		if (!p03_connected(&p03))
+			hal_pwrmgr_lock(MOD_UART0);          /* stay awake for the frame that follows; task arms the timeout */
+		osal_set_event(simpleBLEPeripheral_TaskID, SBP_P03_EDGE_EVT);
+	}
+}
+static void p03_fall_cb(gpio_pin_e pin, gpio_polarity_e type)
+{
+	(void)pin; (void)type;
+	p03_hw.t_fall = ucap_rtc(); if (p03_hw.falls < 0xFFFF) p03_hw.falls++;
+	if (p03_hw.t_rise_any) {                          /* high time from the latest rise, even after the frame completed */
+		uint32_t d = p03_ticks_to_100us(p03_dt(p03_hw.t_fall, p03_hw.t_rise_any));
+		p03_hw.high_last_100us = (uint16_t)(d > 0xFFFF ? 0xFFFF : d);
+	}
+}
+/* MOD_USR1 wake hook: classify IO vs RTC wake (RTC comparator delta; GPIO_WAKEUP_SRC is dead on
+ * this silicon). An IO wake in IDLE is P03 (or the P10 start bit): take the lock now, like stock. */
+static void p03_wake_hook(void)
+{
+	uint32_t rtc = ucap_rtc();
+	uint32_t to_alarm = (AP_AON->RTCCC0 - rtc) & 0xFFFFFF;
+	int io_wake = (to_alarm > 8u && to_alarm < 0x800000u);
+	if (p03_hw.repair_pending) osal_set_event(simpleBLEPeripheral_TaskID, SBP_P03_RECOVER_EVT);
+	if (!io_wake) return;
+	if (p03_hw.io_wakes < 0xFFFF) p03_hw.io_wakes++;
+	p03_hw.t_wake = g_wakeup_rtc_tick & 0xFFFFFF;
+	/* P10 (UART RX) is also an AON wake source in this SDK (fmux_set leaves it input-assigned), so an
+	 * IO wake is only attributed to P03 if the line still reads HIGH; otherwise it is "unknown"
+	 * (P10 start bit, or a P03 pulse already over) and must not become a lead anchor. Either way the
+	 * chip is held awake for the frame. Latch fields are written BEFORE lock/post: hal_pwrmgr_lock's
+	 * own critical section re-enables IRQs on exit, so a live P03 IRQ could otherwise interleave. */
+	if (p03.st == P03_ST_IDLE && !p03_hw.rise_pending) {
+		uint8_t high = hal_gpio_read(GPIO_P03) ? 1 : 0;
+		/* If the main MCU holds P03 high past frame completion, the chip sleeps with P03 high and the
+		 * SDK arms a FALLING wake: that wake is the P03 fall (the synthesised fall_cb has already run,
+		 * MOD_GPIO's handler precedes ours). Nothing follows it: do not lock, just count it. */
+		if (!high && p03_dt(rtc, p03_hw.t_fall) < 164u) {   /* fall within the last 5 ms */
+			if (p03_hw.falls_wake < 0xFFFF) p03_hw.falls_wake++;
+			return;
+		}
+		p03_hw.t_rise = p03_hw.t_wake; p03_hw.rise_src = high ? P03_SRC_WAKE : P03_SRC_UNKNOWN; p03_hw.rise_pending = 1;
+		if (high) p03_hw.t_rise_any = p03_hw.t_wake;
+		hal_pwrmgr_lock(MOD_UART0);
+		osal_set_event(simpleBLEPeripheral_TaskID, SBP_P03_EDGE_EVT);
+	}
+}
+/* MOD_USR1 sleep hook: we must never be sleeping while ARMED (the lock prevents it). Assert only. */
+static void p03_sleep_hook(void)
+{
+	if (p03.st == P03_ST_ARMED || hal_pwrmgr_is_lock(MOD_UART0)) {
+		if (p03_hw.bad_sleep < 255) p03_hw.bad_sleep++;
+		p03_hw.repair_pending = 1;
+	}
+}
+static void p03_dispatch(p03_event_t type, uint32_t t0, uint8_t ok, uint8_t src)
+{
+	p03_ev_t ev; p03_out_t o; uint32_t a;
+	ev.type = type; ev.tick = ucap_rtc(); ev.t0 = t0; ev.ok = ok; ev.src = src;
+	p03_step(&p03, &ev, &o);
+	a = o.acts;   /* order: stop timer -> unlock -> lock -> start timer -> ISR latch reset */
+	if (a & P03_ACT_STOP_TO)   osal_stop_timerEx(simpleBLEPeripheral_TaskID, SBP_P03_TIMEOUT_EVT);
+	if (a & P03_ACT_UNLOCK)    hal_pwrmgr_unlock(MOD_UART0);
+	if (a & P03_ACT_LOCK)      hal_pwrmgr_lock(MOD_UART0);
+	if (a & P03_ACT_START_TO)  osal_start_timerEx(simpleBLEPeripheral_TaskID, SBP_P03_TIMEOUT_EVT, P03_TIMEOUT_MS);
+	if (a & P03_ACT_BURST_RST) {
+		HAL_ENTER_CRITICAL_SECTION();
+		p03_hw.burst_open = 0; p03_hw.rise_pending = 0;
+		if (p03.st != P03_ST_ARMED) { ucap.fr.in_frame = 0; ucap.fr.pos = 0; }   /* no stale partial buffer into the next burst */
+		HAL_EXIT_CRITICAL_SECTION();
+	}
+	p03_lead_ms = p03.lead_ms_last;
+}
+void ucap_p03_edge_evt(void)
+{
+	uint32_t t0, tw; uint8_t src;
+	HAL_ENTER_CRITICAL_SECTION(); t0 = p03_hw.t_rise; src = p03_hw.rise_src; tw = p03_hw.t_wake; HAL_EXIT_CRITICAL_SECTION();
+	if (src == P03_SRC_IRQ && tw) {                   /* IRQ-live latency after a wake, if the rise followed a wake */
+		uint32_t d = p03_dt(t0, tw);
+		if (d < 3277u) p03_hw.wake_lat_last_100us = (uint16_t)p03_ticks_to_100us(d);   /* < 100 ms */
+	}
+	p03_dispatch(P03_EV_RISE, t0, 0, src);
+}
+void ucap_p03_rx_evt(void)
+{
+	uint32_t t0; HAL_ENTER_CRITICAL_SECTION(); t0 = p03_hw.t_first; HAL_EXIT_CRITICAL_SECTION();
+	p03_dispatch(P03_EV_RX_START, t0, 0, 0);
+}
+void ucap_p03_frame_evt(void)
+{
+	uint32_t tick; uint8_t ok;
+	HAL_ENTER_CRITICAL_SECTION(); tick = p03_hw.frame_tick; ok = p03_hw.frame_ok; HAL_EXIT_CRITICAL_SECTION();
+	p03_dispatch(P03_EV_FRAME, tick, ok, 0);
+}
+void ucap_p03_timeout_evt(void) { p03_dispatch(P03_EV_TIMEOUT, 0, 0, 0); }
+void ucap_p03_recover_evt(void) { p03_hw.repair_pending = 0; p03_dispatch(P03_EV_RECOVER, 0, 0, 0); }
+void ucap_p03_connect(void)     { p03_dispatch(P03_EV_CONNECT, 0, 0, 0); }
+void ucap_p03_disconnect(void)  { p03_dispatch(P03_EV_DISCONNECT, 0, 0, 0); }
+uint8_t ucap_p03_connected(void) { return (uint8_t)p03_connected(&p03); }
+void ucap_p03_sanity(void)       { if (p03_sanity_due(&p03, ucap_rtc())) p03_dispatch(P03_EV_RECOVER, 0, 0, 0); }
+static inline void p03_put16(uint8_t *d, uint16_t v) { d[0] = v & 0xFF; d[1] = v >> 8; }
+static inline void p03_put32(uint8_t *d, uint32_t v) { d[0] = v & 0xFF; d[1] = (v >> 8) & 0xFF; d[2] = (v >> 16) & 0xFF; d[3] = v >> 24; }
+#endif /* UCAP_P03 */
+
 static void ucap_process_frame(void) {
 	uint8_t *f = ucap.fr.buf;
 
@@ -442,6 +574,11 @@ static void ucap_process_frame(void) {
 	// the window down within <1 ms.
 	p10_hw.frame_tick = ucap_rtc(); p10_hw.frame_ok = 1;
 	osal_set_event(simpleBLEPeripheral_TaskID, SBP_UCAP_FRAME_EVT);
+#elif defined(UCAP_P03)
+	// V26_P03: stamp the completed CRC-good frame; the task-context FRAME
+	// handler records the P03->first-byte lead and releases MOD_UART0.
+	p03_hw.frame_tick = ucap_rtc(); p03_hw.frame_ok = 1;
+	osal_set_event(simpleBLEPeripheral_TaskID, SBP_UCAP_FRAME_EVT);
 #endif
 #endif
 }
@@ -466,6 +603,21 @@ static void ucap_callback(uart_Evt_t *pev) {
 				ucap_process_frame();
 			else if (ucap.fr.crc_bad != cb) {      /* a full 13-byte buffer failed marker/CRC: timing anchor, no data */
 				p10_hw.frame_tick = ucap_rtc(); p10_hw.frame_ok = 0;
+				osal_set_event(simpleBLEPeripheral_TaskID, SBP_UCAP_FRAME_EVT);
+			}
+		}
+#elif defined(UCAP_P03)
+		{
+			uint16_t cb = ucap.fr.crc_bad;
+			if (!p03_hw.burst_open) {                 /* first byte of a burst: stamp it, hold the chip awake */
+				p03_hw.burst_open = 1; p03_hw.t_first = ucap_rtc();
+				if (!p03_connected(&p03)) hal_pwrmgr_lock(MOD_UART0);
+				osal_set_event(simpleBLEPeripheral_TaskID, SBP_P03_RX_EVT);
+			}
+			if (ucap_frame_feed(&ucap.fr, b))
+				ucap_process_frame();
+			else if (ucap.fr.crc_bad != cb) {      /* a full 13-byte buffer failed marker/CRC: complete, no data */
+				p03_hw.frame_tick = ucap_rtc(); p03_hw.frame_ok = 0;
 				osal_set_event(simpleBLEPeripheral_TaskID, SBP_UCAP_FRAME_EVT);
 			}
 		}
@@ -514,6 +666,25 @@ int ucap_init(void) {
 		osal_set_event(simpleBLEPeripheral_TaskID, SBP_P10_RECOVER_EVT);
 	}
 	return 0;                                               /* no UART init, no lock, no boot window */
+#elif defined(UCAP_P03)
+	{
+		// V26_P03: UART0 initialised once and kept (the SDK re-inits it after every
+		// sleep); no lock at boot. P03 (main-MCU wake line, pulled down) gets
+		// rising+falling edge IRQs; its rise takes the MOD_UART0 lock.
+		int ret = hal_uart_init(cfg, UART0);
+		ucap.uart_inited = (ret == 0) ? 1 : 0;
+		memset((void *)&p03_hw, 0, sizeof(p03_hw));
+		p03_init(&p03);
+		p03_lead_ms = 255;
+		if (hal_pwrmgr_register(MOD_USR1, p03_sleep_hook, p03_wake_hook) != PPlus_SUCCESS)
+			p03_hw.bad_sleep = 255;                         /* hooks are wake-stamp + diagnostics only */
+		hal_gpio_pull_set(GPIO_P03, GPIO_PULL_DOWN);
+		if (hal_gpioin_register(GPIO_P03, p03_rise_cb, p03_fall_cb) != PPlus_SUCCESS) {
+			p03_hw.gpio_fail = 1; p03_hw.repair_pending = 1;
+			osal_set_event(simpleBLEPeripheral_TaskID, SBP_P03_RECOVER_EVT);
+		}
+		return ret;
+	}
 #else
 	int ret = hal_uart_init(cfg, UART0);
 	ucap.uart_inited = (ret == 0) ? 1 : 0;
@@ -551,6 +722,11 @@ void ucap_start_grab(void) {
 	 * unmanaged windows (audit #11/#13/#24/#25/#32/#34/#38/#44). */
 	return;
 #endif
+#ifdef UCAP_P03
+	/* V26_P03: the UART is always on; the P03 edge / first byte hold the chip awake.
+	 * Legacy grab callers must not deinit/reinit the UART or take extra locks. */
+	return;
+#endif
 	if (ucap.uart_inited) {
 		// Window already open (boot acquisition, or a UCAP_SYNC listen
 		// window): a deinit here would drop an in-flight frame.
@@ -578,7 +754,7 @@ void ucap_update_measured_data(void) {
 		measured_data.temp = -(int16_t)(ucap.good_frames ? ucap.good_frames : 1);
 		measured_data.humi = -(int16_t)(ucap.fr.crc_bad ? ucap.fr.crc_bad : 1);
 	}
-#if !defined(UCAP_PROBE) && !defined(UCAP_SYNC) && !defined(UCAP_P10)
+#if !defined(UCAP_PROBE) && !defined(UCAP_SYNC) && !defined(UCAP_P10) && !defined(UCAP_P03)
 	// Close the grab window. Normally the first good frame already
 	// released the UART lock; this is the fallback for a window with no
 	// frames (unlock of an already-unlocked module is a harmless no-op).
@@ -1693,6 +1869,50 @@ int cmd_parser(uint8_t * obuf, uint8_t * ibuf, uint32_t len) {
 				obuf[14] = p10.anchor_valid;
 				p10_put32(&obuf[15], p10.win_open_tick);
 				obuf[19] = 0;
+				olen = 20;
+#endif
+#ifdef UCAP_P03
+			} else if (op == 9) {
+				// "P03 core"
+				obuf[1] = 0x5E; obuf[2] = p03.st; obuf[3] = p03.rise_src;
+				p03_put16(&obuf[4], p03.rises);      p03_put16(&obuf[6], p03.rises_wake);
+				p03_put16(&obuf[8], p03.rx_starts);  p03_put16(&obuf[10], p03.rx_no_edge);
+				p03_put16(&obuf[12], p03.frames);    p03_put16(&obuf[14], p03.frames_bad);
+				p03_put16(&obuf[16], p03.frames_no_edge); p03_put16(&obuf[18], p03.timeouts);
+				olen = 20;
+			} else if (op == 10) {
+				// "P03 timing" (0.1 ms units)
+				uint16_t hi, wl, io, fa;
+				HAL_ENTER_CRITICAL_SECTION();
+				hi = p03_hw.high_last_100us; wl = p03_hw.wake_lat_last_100us; io = p03_hw.io_wakes; fa = p03_hw.falls;
+				HAL_EXIT_CRITICAL_SECTION();
+				obuf[1] = 0x5F;
+				p03_put16(&obuf[2], p03.lead_last);  p03_put16(&obuf[4], p03.lead_min);  p03_put16(&obuf[6], p03.lead_max);
+				p03_put16(&obuf[8], hi);             p03_put16(&obuf[10], wl);           p03_put16(&obuf[12], p03.done_last);
+				p03_put16(&obuf[14], io);            p03_put16(&obuf[16], fa);
+				obuf[18] = p03.lead_ms_last;
+				{	uint16_t rej = p03.rise_after_rx + p03.lead_rejected;
+					obuf[19] = (uint8_t)(((p03.stale > 15 ? 15 : p03.stale) << 4) | (rej > 15 ? 15 : rej)); }   /* stale<<4 | rejected-lead count */
+				olen = 20;
+			} else if (op == 11) {
+				// "P03 hist/diag": lead histogram bins <1,<2,<3,<5,<8,<12,<20,>=20 ms
+				int i;
+				obuf[1] = 0x60;
+				for (i = 0; i < 8; i++) obuf[2 + i] = p03.hist[i];
+				obuf[10] = (uint8_t)(p03.connects > 255 ? 255 : p03.connects); obuf[11] = (uint8_t)(p03.resumes > 255 ? 255 : p03.resumes);
+				p03_put16(&obuf[12], p03.recovers); p03_put16(&obuf[14], p03.sanity_recovers);
+				p03_put16(&obuf[16], p03.wakes_unknown);
+				obuf[18] = p03_hw.bad_sleep;
+				obuf[19] = (uint8_t)((p03_hw.repair_pending ? 1 : 0) | (p03_hw.gpio_fail ? 2 : 0));
+				olen = 20;
+			} else if (op == 12) {
+				// "P03 extra"
+				uint16_t fw; HAL_ENTER_CRITICAL_SECTION(); fw = p03_hw.falls_wake; HAL_EXIT_CRITICAL_SECTION();
+				obuf[1] = 0x61;
+				p03_put16(&obuf[2], fw);                 p03_put16(&obuf[4], p03.frames_bad_armed);
+				p03_put16(&obuf[6], p03.rise_after_rx);  p03_put16(&obuf[8], p03.lead_rejected);
+				p03_put16(&obuf[10], p03.stale);         p03_put16(&obuf[12], p03.wakes_unknown);
+				p03_put32(&obuf[14], p03_hw.t_rise_any); obuf[18] = 0; obuf[19] = 0;
 				olen = 20;
 #endif
 			} else {
