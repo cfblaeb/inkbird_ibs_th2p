@@ -285,7 +285,14 @@ static void adv_measure(void) {
 				measured_data.count++;
 				adv_button_press = 1;
 				adv_button_hold = BTN_ADV_HOLD;
+				// V27: steady state is non-connectable; a button press opens a
+				// ~60 s CONNECTABLE fast-advertising window so a host can connect
+				// (OTA / counter reads / config). It reverts to non-connectable
+				// steady state when adv_reload_count expires (below).
+				gapRole_AdvEventType = LL_ADV_CONNECTABLE_UNDIRECTED_EVT;
+				adv_wrk.adv_reload_count = 60000 / DEF_CON_ADV_INTERVAL_MS;
 				LL_SetAdvData(bthome_data_beacon((void *) gapRole_AdvertData), gapRole_AdvertData);
+				set_new_adv_interval(DEF_CON_ADV_INTERVAL);
 				return;
 			} else if (adv_button_hold) {
 				// Hold in progress: keep advertising the frozen packet.
@@ -430,6 +437,11 @@ static void adv_measure(void) {
 					LL_SetAdvData(bthome_data_beacon((void *) gapRole_AdvertData), gapRole_AdvertData);
 				}
 				// восстановление пользовательского (основного) интервала передачи рекламы
+				// V27: steady state is NON-connectable (a button press or the
+				// post-reboot fast window re-enables connectable). This is the
+				// single choke point for "return to steady", so setting the type
+				// here covers boot-window end, button-window end, and disconnect.
+				gapRole_AdvEventType = LL_ADV_NONCONNECTABLE_UNDIRECTED_EVT;
 				set_new_adv_interval(cfg.advertising_interval * 100);
 #endif
 			}
