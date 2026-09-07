@@ -50,7 +50,7 @@ adv_work_t adv_wrk;
 
 const cfg_t def_cfg = {
 		.flg = FLG_MEAS_NOTIFY | FLG_SHOW_SMILEY,
-		.rf_tx_power = RF_PHY_TX_POWER_MAX, // RF_PHY_TX_POWER_0DBM,
+		.rf_tx_power = RF_PHY_TX_POWER_0DBM, // V27: 0 dBm (was RF_PHY_TX_POWER_MAX) — benchtop range, saves TX energy
 		.adv_event_cnt = 16,
 		.advertising_interval = DEF_ADV_INERVAL/100, // 80 * 62.5 = 5000 ms
 		.measure_interval = 2,  // 5 * 2 = 10 sec
