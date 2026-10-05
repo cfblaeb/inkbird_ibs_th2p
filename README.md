@@ -1,19 +1,19 @@
 # Inkbird IBS-TH2 Plus: custom BTHome firmware
 
 Replacement firmware for the BLE chip (PHY6222) in the Inkbird IBS-TH2 Plus
-thermometer/hygrometer. It reads temperature and humidity from the
+thermometer. It reads temperature and humidity from the
 thermometer's own main MCU and broadcasts them as unencrypted
 [BTHome v2](https://bthome.io), so Home Assistant picks the unit up
 automatically with no Inkbird app or cloud. Pressing the device's button
 sends a BTHome button event, which makes it easy to tell units apart in
 Home Assistant.
 
-The firmware is installed over Bluetooth through Inkbird's own OTA updater.
+The firmware is installed over Bluetooth through a web page.
 You don't need to open the case or use a serial adapter.
 
 Based on [pvvx/THB2](https://github.com/pvvx/THB2).
 
-## What you get (V27)
+## V27
 
 | | |
 |---|---|
@@ -22,7 +22,7 @@ Based on [pvvx/THB2](https://github.com/pvvx/THB2).
 | Objects | temperature (0.01 °C), humidity (0.01 %), battery %, battery voltage, firmware version, button press |
 | Extra object | `0x09` "count": time from the main MCU's wake line to the first UART byte, in ms (diagnostic; 255 means no reading yet) |
 | Connect window | ~60 s after a button press or a battery reinsert, so you can do OTA or read diagnostics |
-| Battery | ~10-14 µA average (design estimate from a static review, not a bench measurement) |
+| Battery life | Estimated to be years |
 
 The steady state is non-connectable on purpose. If a phone or gateway
 holds a connection open, the chip stays fully awake and the battery drains.
@@ -30,7 +30,7 @@ holds a connection open, the chip stays fully awake and the battery drains.
 ## Stock to custom, step by step
 
 You need a computer or Android phone with Chrome or Edge (Web Bluetooth),
-an IBS-TH2 Plus running stock firmware, and this repository.
+an IBS-TH2 Plus running stock firmware (tested on stock 2.7), and this repository.
 
 1. **Check the device is stock.** Scan with any BLE scanner (nRF Connect,
    or the Chrome device picker). A stock unit advertises as **`sps`** with
@@ -116,7 +116,7 @@ until then.
 |---|---|
 | `inkbird_fw/` | Release artifacts (V27), the Web Bluetooth flasher, the stock-bundle generator and its SRAM installer source |
 | `bthome_phy6222/` | Firmware source (pvvx THB2 tree with the `DEVICE_IBSTH2P` target), SDK, host tests |
-| `bthome_phy6222/orig/` | Stock Inkbird firmware dump and the analysis scripts used on it |
+| `bthome_phy6222/orig/` | Stock Inkbird firmware dump |
 | `tools/` | Python flashers and diagnostics (`bthome_monitor.py` live TUI, `ucap_stats.py` counter readout) |
 | `docs/` | Engineering log (per-version notes, the reverse-engineered inter-chip UART protocol, toolchain recipe) and the code reviews |
 
@@ -129,8 +129,6 @@ until then.
 | `BOOT_IBSTH2P_v27_p03_ota.bin` | Custom to custom OTA |
 | `BOOT_IBSTH2P_v27_p03.hex` | Raw image for UART flashing and bundle generation |
 | `ibs_thx_b_2p7_48M_phy6222.hex16` | Inkbird's stock updater image, an input to the bundle generator |
-
-Older versions (V15-V26) are in git history.
 
 ## How it works
 
@@ -205,20 +203,9 @@ done
   (memory, register and config read/write) are compiled in without
   authentication. They can only be reached during the ~60 s connect
   windows.
-- **Limited testing.** Tested only on IBS-TH2 Plus units with a PHY6222.
+- **Limited testing.** Tested only on "new" IBS-TH2 Plus units with a PHY6222.
   Other Inkbird models and hardware revisions are untested.
   `fleet_flash_stock.py` carries a blocklist for two older units that were
   deliberately left on stock.
 
 `docs/V27_REVIEW.md` lists every known issue, with the owner's triage.
-
-## License and third-party content
-
-The firmware source derives from pvvx/THB2 and carries its license
-(`LICENSE`). The PHY62xx SDK under `bthome_phy6222/SDK/` has its own terms
-(`SDK_LICENSE`). Inkbird owns `bthome_phy6222/orig/` (stock firmware dump
-and disassembly), `inkbird_fw/ibs_thx_b_2p7_48M_phy6222.hex16` and the stock
-updater partitions inside each `STAGE3_*` bundle. They are included only
-for interoperability and recovery, and this project's license doesn't
-cover them. Inkbird does not endorse this project. Flashing third-party
-firmware may void your warranty. You use it at your own risk.
