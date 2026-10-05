@@ -1,16 +1,25 @@
-Nrf/
 .venv
 .idea
-build_boot_ibsth2p_*/
+.claude/
 __pycache__/
+Nrf/
+/private/
+
+# firmware build output
+build_boot_ibsth2p_*/
 bthome_phy6222/build*/
-bthome_phy6222/tests/test_ucap_frame
-bthome_phy6222/tests/test_ucap_sync
 inkbird_fw/build/stock_bundle_installer/*.o
 inkbird_fw/build/stock_bundle_installer/*.elf
 inkbird_fw/build/stock_bundle_installer/*.map
 inkbird_fw/build/stock_bundle_installer/*.asm
 inkbird_fw/build/stock_bundle_installer/*.bin
-/private/
+
+# host test binaries
+bthome_phy6222/tests/test_ucap_frame
+bthome_phy6222/tests/test_ucap_sync
 bthome_phy6222/tests/test_ucap_p10
 bthome_phy6222/tests/test_ucap_p03
+bthome_phy6222/tests/test_flash_eep
+
+# local record of stock->custom address pairs written by fleet_flash_stock.py
+tools/fleet_flash_mapping.jsonl

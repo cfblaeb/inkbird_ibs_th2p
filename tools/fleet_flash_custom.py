@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""pvvx-path fleet flasher: upgrade a custom-firmware IBSTH2P to the
-pinned OTA image (IMAGES below; default v24 = fleet release, or
-IBS_OTA_IMAGE=p10 for the V25 "P10 alone" experiment image, IBS-P25).
+"""pvvx-path flasher: upgrade a custom-firmware IBSTH2P to the pinned OTA
+image (IMAGES below; default v27, or IBS_OTA_IMAGE=<key> / a path to any
+PHY6 _ota.bin).
 
 For devices already on custom firmware (38:1F:8D:* BTHome). Their address
 does NOT change across the flash, so HA identity is untouched.
 
-V18+ firmware: power-cycle the device when prompted (60 s fast window).
-V15-V17 firmware (no fast window): run the sudo raw-HCI helper in another
-terminal instead; this script's retry loop will attach to that link.
+V27 is non-connectable between button presses: press the device button
+(or pull and reinsert the battery) when prompted; either opens a ~60 s
+connectable window. V18-V26: power-cycle. V15-V17 have no fast window and
+need a raw-HCI LE connection helper (ble_le_conn_ext.py, in git history).
 
-Usage: python3 fleet_flash_custom.py 38:1F:8D:XX:XX:XX
-       IBS_OTA_IMAGE=p10 python3 fleet_flash_custom.py 38:1F:8D:XX:XX:XX
+Usage: python3 tools/fleet_flash_custom.py 38:1F:8D:XX:XX:XX
+       IBS_OTA_IMAGE=path/to/BOOT_xxx_ota.bin python3 tools/fleet_flash_custom.py 38:1F:8D:XX:XX:XX
 """
 import asyncio
 import sys
@@ -20,18 +21,19 @@ from pathlib import Path
 
 from bleak import BleakClient
 
-REPO = Path(__file__).parent
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
 import os, re
 IMAGES = {
-    "v24": "BOOT_IBSTH2P_v24_ota.bin",        # default, fleet release
-    "p10": "BOOT_IBSTH2P_v25_p10_ota.bin",    # V25 "P10 alone" experiment (IBS-P25)
-    "p03": "BOOT_IBSTH2P_v26_p03_ota.bin",    # V26 "P03 wake-line" receiver + lead measurement (IBS-W26)
-    "v27": "BOOT_IBSTH2P_v27_p03_ota.bin",    # V27 = V26_P03 + 0 dBm TX + non-connectable/connect-on-button (IBS-W27)
+    "v27": "BOOT_IBSTH2P_v27_p03_ota.bin",    # V27: P03 wake-line receiver, non-connectable steady state (IBS-W27)
 }
-IMAGE = os.environ.get("IBS_OTA_IMAGE", "v24")
-if IMAGE not in IMAGES:
-    sys.exit(f"IBS_OTA_IMAGE must be one of {sorted(IMAGES)}")
-OTA_BIN = REPO / "inkbird_fw" / IMAGES[IMAGE]
+IMAGE = os.environ.get("IBS_OTA_IMAGE", "v27")
+if IMAGE in IMAGES:
+    OTA_BIN = REPO / "inkbird_fw" / IMAGES[IMAGE]
+elif Path(IMAGE).is_file():
+    OTA_BIN = Path(IMAGE)
+else:
+    sys.exit(f"IBS_OTA_IMAGE must be one of {sorted(IMAGES)} or a path to an _ota.bin")
 SW_REV_CHAR = "00002a28-0000-1000-8000-00805f9b34fb"
 
 ADDR = sys.argv[1].upper() if len(sys.argv) > 1 else ""
@@ -40,7 +42,7 @@ if not ADDR.startswith("38:1F:8D"):
     sys.exit(1)
 
 sys.argv = ["ble_phy_ota_flash.py", str(OTA_BIN), ADDR]
-src = open(REPO / "ble_phy_ota_flash.py").read()
+src = open(HERE / "ble_phy_ota_flash.py").read()
 entry = "sys.exit(asyncio.run(main()))"
 assert entry in src
 ns = {}
@@ -62,13 +64,12 @@ async def connect_retry(deadline, why):
 
 async def main():
     img = ns["load_image"](str(OTA_BIN))
-    print(f"POWER-CYCLE {ADDR} now — retrying connect for up to 10 min. "
-          "(No fast window on V15-V17: run the sudo raw-HCI helper instead.)",
-          flush=True)
+    print(f"PRESS THE BUTTON on {ADDR} (or power-cycle it) now — retrying "
+          "connect for up to 10 min.", flush=True)
     client = await connect_retry(time.monotonic() + 600, "waiting for window")
     if client is None:
-        print("never connected — rerun, or the device is pre-V18 (sudo helper).",
-              flush=True)
+        print("never connected — rerun and press the button again "
+              "(pre-V18 firmware needs a raw-HCI connect helper).", flush=True)
         return 1
     try:
         rev = (await client.read_gatt_char(SW_REV_CHAR)).decode()

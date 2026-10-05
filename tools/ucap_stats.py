@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """Read the IBSTH2P UART-capture counters over BLE and estimate the wake-on-RX
 frame catch rate — a ~2 minute wireless test for the scheduler mis-lock /
-CRC-corruption drain hypothesis (see analysis-notes/
-firmware_drain_review_2026-09-02.md).
+CRC-corruption drain hypothesis (see docs/ENGINEERING_LOG.md).
 
 Usage:
-    python3 ucap_stats.py 38:1F:8D:17:9B:AF          # Freezer B
-    python3 ucap_stats.py 38:1F:8D:DA:BA:20          # Freezer F
+    python3 ucap_stats.py <MAC>
     python3 ucap_stats.py <MAC> --p10                # also read V25_P10 scheduler counters (GATT ops 5-8)
     python3 ucap_stats.py <MAC> --p03                # also read V26_P03 wake-line receiver counters (GATT ops 9-11)
 
-Connecting: the units advertise every 10 s, which the Linux kernel's 4 s
-create-connection limit cannot catch. Either (a) run inside the 60 s fast
-window after a battery reinsert (1.5 s adv), or (b) first run
-`sudo python3 ble_le_conn_ext.py` (edit ADDR) so BlueZ adopts a link, then run
-this script immediately. This script retries bleak connects for up to 90 s.
+Connecting: V27 is non-connectable between button presses. Press the button
+(or reinsert the battery) to open the ~60 s connectable window, then run this
+script. Note a battery reinsert reboots the unit and zeroes the counters. This script retries bleak connects for up to 90 s.
 
-Reads (GATT char 0xFFF4, same channel frame_probe_monitor.py uses):
+Reads (GATT char 0xFFF4):
     CMD_ID_I2C_SCAN op 0 -> uart_inited, sensor_valid, total_bytes(u32),
                             good_frames(u16), crc_bad(u16), last temp/humi
     CMD_ID_UTC_TIME      -> seconds since boot (clock is zeroed at reset and
@@ -175,7 +171,7 @@ async def main():
             print(f"connect attempt failed ({e.__class__.__name__}); retrying ...")
             await asyncio.sleep(1)
     if client is None:
-        print("could not connect within 90 s — use the fast window or ble_le_conn_ext.py")
+        print("could not connect within 90 s — press the button to open the connect window")
         sys.exit(2)
     print(f"connected to {addr}")
     try:

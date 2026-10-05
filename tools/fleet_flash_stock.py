@@ -18,7 +18,9 @@ Flow:
      downstream consumers can carry device identity across the change
 
 Usage:
-    python3 fleet_flash_stock.py 49:24:06:18:12:33 [STAGE3_...hex16]
+    python3 tools/fleet_flash_stock.py 49:XX:XX:XX:XX:XX [STAGE3_...hex16]
+
+Default bundle: inkbird_fw/STAGE3_IBSTH2P_v27_p03_stock_bundle_installer.hex16.
 
 NEVER flash 49:23:09:15:12:B2 or 49:23:09:15:14:D7 (older hardware that
 works well on stock — hard blocklist below).
@@ -32,7 +34,8 @@ from pathlib import Path
 
 from bleak import BleakClient, BleakScanner
 
-sys.path.insert(0, str(Path(__file__).parent / "inkbird_fw"))
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "inkbird_fw"))
 from verify_ota_flash import apply_trampoline, parse_hex16, split_for_stock_ota
 
 BLOCKLIST = {"49:23:09:15:12:B2", "49:23:09:15:14:D7"}
@@ -44,8 +47,8 @@ SHB_DATA = "5833ff04-9b8b-5191-6142-22a4536ef123"
 PHY_SERVICE = "0000fcd2-0000-1000-8000-00805f9b34fb"
 SW_REV = "00002a28-0000-1000-8000-00805f9b34fb"
 
-DEFAULT_BUNDLE = Path(__file__).parent / "inkbird_fw" / \
-    "STAGE3_IBSTH2P_v25_p10_stock_bundle_installer.hex16"
+DEFAULT_BUNDLE = REPO / "inkbird_fw" / \
+    "STAGE3_IBSTH2P_v27_p03_stock_bundle_installer.hex16"
 
 ERR_NAMES = {  # pplusErrorName() in InkbirdOTA.html
     0x01: "verify error", 0x02: "unknown command", 0x03: "not in OTA mode",

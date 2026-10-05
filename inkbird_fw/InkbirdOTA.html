@@ -336,7 +336,7 @@ function ensureFirmwareEligibleForStockOta() {
 
 function ensureFirmwareEligibleForPhyOta() {
   if (loadedKind !== "phy6" || !pvvxImage) {
-    log("ERROR: The BTHome device flash path needs a PHY6 OTA .bin (e.g. BOOT_IBSTH2P_v16_ota.bin, built by phy62x2_ota.py). " +
+    log("ERROR: The BTHome device flash path needs a PHY6 OTA .bin (e.g. BOOT_IBSTH2P_v27_p03_ota.bin, built by phy62x2_ota.py). " +
         (loadedKind === "hex" ? "A .hex/.hex16 is loaded — that one is for the stock OTA path." : "Load a firmware file first."));
     setStatus("Wrong file for BTHome OTA", "error");
     return false;

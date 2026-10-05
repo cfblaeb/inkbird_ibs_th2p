@@ -2,8 +2,8 @@
  * ucap_p03.h — "P03 wake" receiver for the IBSTH2P inter-chip UART (V26_P03).
  * Pure C, no SDK includes; host-tested by tests/test_ucap_p03.c.
  *
- * Stock-firmware mechanism (see analysis-notes/v25_p10_design/
- * STOCK_FIRMWARE_WAKE_MECHANISM.md): the main MCU raises P03 before it sends
+ * Stock-firmware mechanism (static analysis of orig/orig.bin, summarised in
+ * docs/ENGINEERING_LOG.md, V26_P03 section): the main MCU raises P03 before it sends
  * a frame. We keep UART0 initialised across sleep (the SDK re-inits it in the
  * wake hook), sleep with P03 armed as a rising-edge wake/IRQ, take the
  * MOD_UART0 sleep-lock on the edge (or on the first RX byte / any IO wake if

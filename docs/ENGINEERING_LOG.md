@@ -1,4 +1,8 @@
-# Inkbird IBS-TH2 Plus — Project Plan
+# Inkbird IBS-TH2 Plus — Engineering Log
+
+> Historical development log, kept as written per version. Sections near the
+> top describe early state (V15-V19) and are superseded; the README is the
+> current entry point. Unit labels (Fridge A, Freezer B, ...) are anonymised.
 
 ## Objective
 
@@ -762,8 +766,8 @@ revision, BTHome fw 23.0.0, clean 10 s packet cadence, sane temperature,
 | Fridge D | 49:24:06:18:15:2E -> 38:1F:8D:01:52:4F | 14.8 C (just handled; cooling) |
 
 Three units got fresh batteries (were dead). Physical check settled a
-records conflict: the sensor ex-12:A9 sits on the **Freezer B** and
-ex-17:BB on the **Freezer C** — one downstream record set had those two
+records conflict: the sensor ex-12:A9 sits on **Freezer B** and
+ex-17:BB on **Freezer C** — one downstream record set had those two
 swapped (now corrected). Downstream consumers were rebound to the new
 addresses per the mapping file, with the freezer/fridge temperature
 sanity check applied before renames were trusted (one fridge probe read
@@ -1107,7 +1111,7 @@ Artifacts: `inkbird_fw/BOOT_IBSTH2P_v26_p03.hex` (sha256 `efa790cf42e3be348a3c41
 
 ### Why
 Static analysis of the stock image (`orig/orig.bin`; write-up in
-`analysis-notes/v25_p10_design/STOCK_FIRMWARE_WAKE_MECHANISM.md`): the main MCU raises
+separate analysis notes, not in this repo): the main MCU raises
 **P03** before each UART frame; stock's only GPIO interrupt is P03 rising (handler `0x1fff583d`
 locks MOD_UART0), it keeps UART0 initialised across sleep, and releases the lock after a parsed
 frame or when exactly 11 bytes are pending in its ring (no timeout — the likely cause of stock's
@@ -1188,11 +1192,11 @@ findings (FIFO trigger, wake attribution, CRC-bad release, overflow, fall-wake) 
    buttons". (Phones and ESP32 proxies connect without this — the 4 s
    create-connection limit is Linux-kernel-specific.)
 7. Investigate the field-observed **double button event** (2026-08-03, unit
-   8F03 = a large freezer, running V22). One press at ~09:06:20 UTC
+   8F03, a large freezer, running V22). One press at ~09:06:20 UTC
    (receiver-1 time, NTP-true; receiver 2 was −2 min; cross-checked against
    public web-server Date headers after the first reference machine
-   turned out to be +2 min fast). receiver 2, same room, RSSI −72: exactly one
-   event, correct. receiver 1, through walls at RSSI −94: TWO events ~3.5 min
+   turned out to be +2 min fast). Receiver 2, same room, RSSI −72: exactly one
+   event, correct. Receiver 1, through walls at RSSI −94: TWO events ~3.5 min
    apart, the second coincident to the second with a battery+voltage entity
    update. Note for the analysis: V22 is a wake-on-RX build whose packet id
    advances every ~10 s outside button bursts, so HA-side dedup semantics

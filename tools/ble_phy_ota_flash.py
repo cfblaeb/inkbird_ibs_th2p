@@ -23,10 +23,11 @@ from bleak import BleakClient
 from dbus_fast.aio import MessageBus
 from dbus_fast import BusType, Message
 
-ADDR = sys.argv[2] if len(sys.argv) > 2 else "38:1F:8D:CF:77:6F"
+if len(sys.argv) < 3:
+    sys.exit("usage: ble_phy_ota_flash.py <BOOT_xxx_ota.bin> <38:1F:8D:XX:XX:XX>")
+ADDR = sys.argv[2]
 DEVPATH = "/org/bluez/hci0/dev_" + ADDR.replace(":", "_")
-OTA_BIN = sys.argv[1] if len(sys.argv) > 1 else \
-    "/src/inkbird_ibs_th2p/inkbird_fw/BOOT_IBSTH2P_v16_ota.bin"
+OTA_BIN = sys.argv[1]
 U = lambda s: f"0000{s}-0000-1000-8000-00805f9b34fb"
 OTA_CHAR = U("fff3")
 PHY6_MAGIC = 0x36594850
