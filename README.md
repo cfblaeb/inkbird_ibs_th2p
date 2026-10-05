@@ -29,15 +29,25 @@ holds a connection open, the chip stays fully awake and the battery drains.
 
 ## Stock to custom, step by step
 
-You need a computer or Android phone with Chrome or Edge (Web Bluetooth),
-an IBS-TH2 Plus running stock firmware (tested on stock 2.7), and this repository.
+You need a computer with Chrome or Edge (Web Bluetooth), Python 3 (to
+serve the flasher page locally), an IBS-TH2 Plus running stock firmware
+(tested on stock 2.7), and this repository.
 
 1. **Check the device is stock.** Scan with any BLE scanner (nRF Connect,
    or the Chrome device picker). A stock unit advertises as **`sps`** with
    an address starting `49:`. Write down that address. The custom firmware
    comes up on a different one (see step 6).
-2. **Open the flasher.** Open `inkbird_fw/InkbirdOTA.html` in Chrome. A
-   local file works; the page only talks to the device over Web Bluetooth.
+2. **Open the flasher.** Web Bluetooth only works on a secure origin
+   (`https://` or `http://localhost`), so don't double-click the HTML file.
+   Instead, serve the folder locally:
+
+   ```bash
+   cd inkbird_fw && python3 -m http.server 8000
+   ```
+
+   Then open <http://localhost:8000/InkbirdOTA.html> in Chrome. On Linux,
+   Web Bluetooth may need `chrome://flags/#enable-experimental-web-platform-features`
+   turned on.
 3. **Load the bundle.** Under *1. Load Firmware*, choose
    `inkbird_fw/STAGE3_IBSTH2P_v27_p03_stock_bundle_installer.hex16`.
 4. **Connect and flash.** Click *Connect & Flash* and pick the `sps`
@@ -84,7 +94,7 @@ they are.
 
 1. Press the device's button. That opens a ~60 s connectable window.
    Reinserting the battery also works.
-2. In `InkbirdOTA.html`, load `inkbird_fw/BOOT_IBSTH2P_v27_p03_ota.bin`,
+2. In the flasher page (served as in step 2 above), load `inkbird_fw/BOOT_IBSTH2P_v27_p03_ota.bin`,
    click *Connect & Flash* and pick `IBSTH2P-XXXXXX`.
 
 Or from Linux:
